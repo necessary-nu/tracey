@@ -176,7 +176,8 @@ dependencies = [
 [[package]]
 name = "facet"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91b25c0ace8802aca451d40f70cbaec6ad0e17b743cc25b9c396f15999a839fa"
 dependencies = [
  "autocfg",
  "facet-core",
@@ -187,7 +188,8 @@ dependencies = [
 [[package]]
 name = "facet-args"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21b20afdab1ab7ddc991b5d6df4844e0a3baa9a830bd1dac75e5bbc67ac56fb3"
 dependencies = [
  "facet",
  "facet-core",
@@ -201,7 +203,8 @@ dependencies = [
 [[package]]
 name = "facet-core"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbb25d8dbcd3db0ef7c42eb5c2e8b6f36838add48f7ff6c1774b6ee6c89b00d0"
 dependencies = [
  "autocfg",
  "impls",
@@ -210,7 +213,8 @@ dependencies = [
 [[package]]
 name = "facet-kdl"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4acdfa8673bfce062b616764f18b9e2227fce11b96e45579e6fc10a723abe816"
 dependencies = [
  "facet",
  "facet-core",
@@ -225,7 +229,8 @@ dependencies = [
 [[package]]
 name = "facet-macro-parse"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42b83cf60c09dbfb322c861aa6ff3b6c57dee1d1b26813bcab57bbdb00ca741f"
 dependencies = [
  "facet-macro-types",
  "proc-macro2",
@@ -235,7 +240,8 @@ dependencies = [
 [[package]]
 name = "facet-macro-types"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "931946e870c7e5322ae453b6ed4716d61a3edc7d3600de990c97ecd87cbe81fc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -245,7 +251,8 @@ dependencies = [
 [[package]]
 name = "facet-macros"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae2921eef1d5ffff6e739ad997222bc6f0e58e26a0541fbe4a0b8027a121a602"
 dependencies = [
  "facet-macros-impl",
 ]
@@ -253,7 +260,8 @@ dependencies = [
 [[package]]
 name = "facet-macros-impl"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b612aaa6e3bae2a22ed2cec01ca413f103177e70566c0194b15f0afd1f181d41"
 dependencies = [
  "facet-macro-parse",
  "facet-macro-types",
@@ -266,7 +274,8 @@ dependencies = [
 [[package]]
 name = "facet-reflect"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "853b174f765e1e91828d49ae2bef072fb371309d4bfffe83b0e2e9fce0cd79b1"
 dependencies = [
  "facet-core",
  "miette",
@@ -275,12 +284,14 @@ dependencies = [
 [[package]]
 name = "facet-singularize"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "374716d4ea76f5e14cc39674215ec37f835c0dfe18d39c76371a3bdf983f4cdc"
 
 [[package]]
 name = "facet-solver"
 version = "0.35.0"
-source = "git+https://github.com/facet-rs/facet?branch=main#4bb95534779dd9eb9990fe52cae5d7d8c38048ad"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3efa09e082d7050f410133406401cb74169994af31705d02ba9d5548a23c2f39"
 dependencies = [
  "facet-core",
  "facet-reflect",

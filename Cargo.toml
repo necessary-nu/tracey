@@ -5,12 +5,17 @@ edition = "2024"
 description = "CLI tool to measure spec coverage in Rust codebases"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bearcove/tracey"
+authors = ["Amos Wenger <amos@bearcove.eu>"]
+keywords = ["specification", "coverage", "traceability", "testing", "documentation"]
+categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
+rust-version = "1.85"
 
 [dependencies]
 # Facet ecosystem for config parsing and CLI
-facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-args = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-kdl = { git = "https://github.com/facet-rs/facet", branch = "main" }
+facet = "0.35"
+facet-args = "0.35"
+facet-kdl = "0.35"
 
 # Error handling
 color-eyre = "0.6"
