@@ -26,7 +26,7 @@ facet-miette = { git = "https://github.com/facet-rs/facet", branch = "main" }
 
 # Error handling
 eyre = "0.6"
-miette = { version = "7", features = ["fancy-no-backtrace"] }
+miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
 
 # HTTP fetching
 ureq = "3"
