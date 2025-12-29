@@ -2,6 +2,10 @@
 members = ["crates/*"]
 resolver = "3"
 
+[workspace.metadata.cargo-shear]
+# Used by #[facet(derive(Error))] macro in tracey
+ignored = ["facet-error"]
+
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -20,7 +24,6 @@ facet-json = "0.35"
 
 # Error handling
 eyre = "0.6"
-color-eyre = "0.6"
 miette = { version = "7", features = ["fancy-no-backtrace"] }
 facet-error = "0.35"
 

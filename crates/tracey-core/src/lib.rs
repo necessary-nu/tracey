@@ -19,7 +19,7 @@
 //!
 //! See [`SUPPORTED_EXTENSIONS`] for the full list of supported file types.
 //!
-//! ```rust
+//! ```text
 //! // [impl channel.id.parity] - implementation reference
 //! // [verify error.handling] - test/verification reference
 //! // [rule.id] - basic reference (legacy syntax)

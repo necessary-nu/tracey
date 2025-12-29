@@ -25,7 +25,7 @@ pub struct SpecConfig {
     pub name: Name,
 
     /// URL to the spec's _rules.json manifest
-    /// e.g., "https://rapace.dev/_rules.json"
+    /// e.g., `https://rapace.dev/_rules.json`
     #[facet(kdl::child, default)]
     pub rules_url: Option<RulesUrl>,
 
