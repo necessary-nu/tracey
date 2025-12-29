@@ -59,6 +59,8 @@ pub struct ProcessedMarkdown {
 }
 
 /// A rule entry in the manifest, with its target URL.
+///
+/// [impl manifest.format.rule-entry]
 #[derive(Debug, Clone, Facet)]
 pub struct ManifestRuleEntry {
     /// The URL fragment to link to this rule (e.g., "#r-channel.id.allocation")
@@ -66,6 +68,8 @@ pub struct ManifestRuleEntry {
 }
 
 /// The rules manifest - maps rule IDs to their URLs.
+///
+/// [impl manifest.format.rules-key]
 #[derive(Debug, Clone, Facet)]
 pub struct RulesManifest {
     /// Map from rule ID to rule entry
@@ -97,6 +101,8 @@ impl RulesManifest {
     /// Merge another manifest into this one.
     ///
     /// Returns a list of duplicate rule IDs if any conflicts are found.
+    ///
+    /// [impl markdown.duplicates.cross-file]
     pub fn merge(&mut self, other: &RulesManifest) -> Vec<DuplicateRule> {
         let mut duplicates = Vec::new();
         for (id, entry) in &other.rules {
@@ -114,6 +120,8 @@ impl RulesManifest {
     }
 
     /// Serialize the manifest to pretty-printed JSON.
+    ///
+    /// [impl manifest.format.json]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("failed to serialize rules manifest to JSON")
     }
@@ -185,10 +193,13 @@ impl MarkdownProcessor {
             let line_byte_len = line.len();
 
             // Check if this line is a rule identifier: r[rule.id]
+            // [impl markdown.syntax.marker]
+            // [impl markdown.syntax.standalone]
             if trimmed.starts_with("r[") && trimmed.ends_with(']') && trimmed.len() > 3 {
                 let rule_id = &trimmed[2..trimmed.len() - 1];
 
                 // Check for duplicates
+                // [impl markdown.duplicates.same-file]
                 if !seen_rule_ids.insert(rule_id.to_string()) {
                     bail!("duplicate rule identifier: r[{}]", rule_id);
                 }
@@ -236,6 +247,11 @@ impl MarkdownProcessor {
 }
 
 /// Generate HTML for a rule anchor badge.
+///
+/// [impl markdown.html.div]
+/// [impl markdown.html.anchor]
+/// [impl markdown.html.link]
+/// [impl markdown.html.wbr]
 fn rule_to_html(rule_id: &str, anchor_id: &str) -> String {
     // Insert <wbr> after dots for better line breaking
     let display_id = rule_id.replace('.', ".<wbr>");
@@ -375,6 +391,7 @@ Some regular content without any rules.
     #[test]
     fn test_rule_like_but_not_rule() {
         // These shouldn't be parsed as rules
+        // [verify markdown.syntax.inline-ignored]
         let markdown = r#"
 This is r[not.a.rule] inline.
 `r[code.block]`

@@ -1,4 +1,4 @@
 spec {
-    name "test-spec"
-    rules_file "test_rules.json"
+    name "tracey"
+    rules_glob "docs/spec/**/*.md"
 }

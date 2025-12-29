@@ -1,6 +1,8 @@
 //! Configuration schema for tracey
 //!
 //! Config lives at `.config/tracey/config.kdl` relative to the project root.
+//!
+//! [impl config.format.kdl]
 
 use facet::Facet;
 use facet_kdl as kdl;
@@ -17,6 +19,8 @@ pub struct Config {
 #[derive(Debug, Facet)]
 pub struct SpecConfig {
     /// Name of the spec (for display purposes)
+    ///
+    /// [impl config.spec.name]
     #[facet(kdl::child)]
     pub name: Name,
 

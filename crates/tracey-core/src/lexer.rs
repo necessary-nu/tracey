@@ -1,6 +1,7 @@
 //! Rust lexer for extracting rule references from comments
 //!
-//! Looks for patterns like `[verb rule.id]` or `[rule.id]` in comments.
+//! This module implements parsing of rule references from Rust source code.
+//! It scans comments for patterns like `[verb rule.id]` or `[rule.id]`.
 
 use crate::sources::Sources;
 use eyre::Result;
@@ -8,6 +9,9 @@ use facet::Facet;
 use std::path::{Path, PathBuf};
 
 /// Byte span in source code
+///
+/// [impl ref.span.offset]
+/// [impl ref.span.length]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 pub struct SourceSpan {
     /// Byte offset from start of file
@@ -23,6 +27,12 @@ impl SourceSpan {
 }
 
 /// The relationship type between code and a spec rule
+///
+/// [impl ref.verb.define]
+/// [impl ref.verb.impl]
+/// [impl ref.verb.verify]
+/// [impl ref.verb.depends]
+/// [impl ref.verb.related]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Facet)]
 #[repr(u8)]
 pub enum RefVerb {
@@ -70,6 +80,8 @@ impl std::fmt::Display for RefVerb {
 }
 
 /// A reference to a rule found in source code
+///
+/// [impl ref.span.file]
 #[derive(Debug, Clone, Facet)]
 pub struct RuleReference {
     /// The relationship type (impl, verify, depends, etc.)
@@ -98,6 +110,8 @@ pub struct ParseWarning {
 }
 
 /// Types of parse warnings
+///
+/// [impl ref.verb.unknown]
 #[derive(Debug, Clone, Facet)]
 #[repr(u8)]
 pub enum WarningKind {
@@ -171,6 +185,8 @@ pub(crate) fn extract_from_content(path: &Path, content: &str, rules: &mut Rules
         let line_start = line_starts.get(line_idx).copied().unwrap_or(0);
 
         // Check for line comments (// or ///)
+        // [impl ref.comments.line]
+        // [impl ref.comments.doc]
         if let Some(comment_pos) = line.find("//") {
             let comment = &line[comment_pos..];
             let comment_start = line_start + comment_pos;
@@ -179,6 +195,7 @@ pub(crate) fn extract_from_content(path: &Path, content: &str, rules: &mut Rules
     }
 
     // Handle block comments /* */
+    // [impl ref.comments.block]
     let mut in_block_comment = false;
     let mut block_start = 0;
     let mut block_line = 0;
@@ -216,6 +233,7 @@ fn extract_references_from_text(
     let mut chars = text.char_indices().peekable();
 
     while let Some((start_idx, ch)) = chars.next() {
+        // [impl ref.syntax.brackets]
         if ch == '[' {
             let bracket_start = text_offset + start_idx;
 
@@ -237,6 +255,7 @@ fn extract_references_from_text(
 
             if valid {
                 // Read the first word (could be verb or start of rule ID)
+                // [impl ref.syntax.rule-id]
                 while let Some(&(_, c)) = chars.peek() {
                     if c == ']' || c == ' ' {
                         break;
@@ -258,6 +277,7 @@ fn extract_references_from_text(
             if let Some(&(end_idx, next_char)) = chars.peek() {
                 if next_char == ' ' {
                     // Space after first word - might be [verb rule.id]
+                    // [impl ref.syntax.verb]
                     if let Some(verb) = RefVerb::parse(&first_word) {
                         chars.next(); // consume space
 
@@ -317,6 +337,7 @@ fn extract_references_from_text(
                     }
                 } else if next_char == ']' {
                     // Immediate close - this is [rule.id] format (legacy)
+                    // [impl ref.verb.default]
                     chars.next(); // consume ]
 
                     // Validate: must contain dot, not end with dot

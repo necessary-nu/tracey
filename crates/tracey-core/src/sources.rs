@@ -127,6 +127,7 @@ impl Sources for WalkSources {
         let rules = Mutex::new(Rules::new());
 
         // Build the walker
+        // [impl walk.gitignore]
         let walker = WalkBuilder::new(&self.root)
             .follow_links(true)
             .hidden(false) // Don't skip hidden files (but .git is in .gitignore)

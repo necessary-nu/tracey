@@ -189,6 +189,7 @@ fn run_coverage_command(args: Args) -> Result<()> {
     let project_root = find_project_root()?;
 
     // Load config
+    // [impl config.path.default]
     let config_path = args
         .config
         .unwrap_or_else(|| project_root.join(".config/tracey/config.kdl"));
@@ -245,6 +246,7 @@ fn run_coverage_command(args: Args) -> Result<()> {
                 );
                 load_manifest_from_glob(&project_root, &glob.pattern)?
             }
+            // [impl config.spec.source]
             (None, None, None) => {
                 eyre::bail!(
                     "Spec '{}' has no rules source - please specify rules_url, rules_file, or rules_glob",
@@ -267,6 +269,8 @@ fn run_coverage_command(args: Args) -> Result<()> {
         // Scan source files
         eprintln!("{} Scanning Rust files...", "->".blue().bold());
 
+        // [impl config.spec.include]
+        // [impl walk.default-include]
         let include: Vec<String> = if spec_config.include.is_empty() {
             vec!["**/*.rs".to_string()]
         } else {
@@ -277,6 +281,8 @@ fn run_coverage_command(args: Args) -> Result<()> {
                 .collect()
         };
 
+        // [impl config.spec.exclude]
+        // [impl walk.default-exclude]
         let exclude: Vec<String> = if spec_config.exclude.is_empty() {
             vec!["target/**".to_string()]
         } else {

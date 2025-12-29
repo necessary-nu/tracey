@@ -32,6 +32,10 @@ pub struct CoverageReport {
 
 impl CoverageReport {
     /// Compute coverage from rules and manifest
+    ///
+    /// [impl coverage.compute.covered]
+    /// [impl coverage.compute.uncovered]
+    /// [impl coverage.compute.invalid]
     pub fn compute(spec_name: impl Into<String>, manifest: &SpecManifest, rules: &Rules) -> Self {
         let spec_name = spec_name.into();
         let mut covered_rules = HashSet::new();
@@ -76,6 +80,8 @@ impl CoverageReport {
     }
 
     /// Coverage percentage (0.0 - 100.0)
+    ///
+    /// [impl coverage.compute.percentage]
     pub fn coverage_percent(&self) -> f64 {
         if self.total_rules == 0 {
             return 100.0;
