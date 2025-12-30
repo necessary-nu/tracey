@@ -1,6 +1,6 @@
 [package]
 name = "tracey"
-version = "0.5.0"
+version = "1.0.0"
 description = "CLI tool to measure spec coverage in Rust codebases"
 keywords = ["specification", "coverage", "traceability", "testing", "documentation"]
 categories = ["development-tools", "command-line-utilities"]

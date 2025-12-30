@@ -14,7 +14,7 @@ authors = ["Amos Wenger <amos@bearcove.eu>"]
 
 [workspace.dependencies]
 # Internal
-tracey-core = { path = "crates/tracey-core", version = "0.5.0" }
+tracey-core = { path = "crates/tracey-core", version = "1.0.0" }
 
 # Facet ecosystem (from git for facet-miette support)
 facet = { git = "https://github.com/facet-rs/facet", branch = "main" }

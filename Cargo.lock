@@ -2232,7 +2232,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracey"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "eyre",
@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "tracey-core"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "arborium",
  "arborium-rust",
@@ -2802,7 +2802,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "zerocopy"
