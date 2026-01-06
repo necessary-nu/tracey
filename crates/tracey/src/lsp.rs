@@ -122,6 +122,7 @@ impl Backend {
                         source_column: rule.source_column,
                         impl_refs: rule.impl_refs.clone(),
                         verify_refs: rule.verify_refs.clone(),
+                        depends_refs: rule.depends_refs.clone(),
                         spec_name: impl_key.0.clone(),
                     });
                 }
@@ -243,6 +244,7 @@ struct RequirementInfo {
     source_column: Option<usize>,
     impl_refs: Vec<crate::serve::ApiCodeRef>,
     verify_refs: Vec<crate::serve::ApiCodeRef>,
+    depends_refs: Vec<crate::serve::ApiCodeRef>,
     #[allow(dead_code)]
     spec_name: String,
 }
@@ -270,6 +272,8 @@ impl LanguageServer for Backend {
                 document_highlight_provider: Some(OneOf::Left(true)),
                 // r[impl lsp.impl.from-ref]
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+                // r[impl lsp.references.from-reference]
+                references_provider: Some(OneOf::Left(true)),
                 // Sync full document content
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
@@ -544,6 +548,74 @@ impl LanguageServer for Backend {
             )))
         } else {
             Ok(Some(GotoDefinitionResponse::Array(locations)))
+        }
+    }
+
+    // r[impl lsp.references.from-reference]
+    // r[impl lsp.references.from-definition]
+    async fn references(&self, params: ReferenceParams) -> LspResult<Option<Vec<Location>>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let Some((req_id, _range)) = self.find_req_at_position(uri, position) else {
+            return Ok(None);
+        };
+
+        let Some(info) = self.find_requirement(&req_id) else {
+            return Ok(None);
+        };
+
+        let mut locations = Vec::new();
+
+        // Helper to convert ApiCodeRef to Location
+        let to_location = |r: &crate::serve::ApiCodeRef| -> Option<Location> {
+            let path = self.project_root.join(&r.file);
+            let uri = Url::from_file_path(&path).ok()?;
+            let line = r.line.saturating_sub(1) as u32;
+            Some(Location {
+                uri,
+                range: Range {
+                    start: Position { line, character: 0 },
+                    end: Position { line, character: 0 },
+                },
+            })
+        };
+
+        // Add definition location if include_declaration is true
+        if params.context.include_declaration
+            && !info.source_file.is_empty()
+            && let Ok(uri) = Url::from_file_path(self.project_root.join(&info.source_file))
+        {
+            let line = info
+                .source_line
+                .map(|l| l.saturating_sub(1) as u32)
+                .unwrap_or(0);
+            let character = info
+                .source_column
+                .map(|c| c.saturating_sub(1) as u32)
+                .unwrap_or(0);
+            locations.push(Location {
+                uri,
+                range: Range {
+                    start: Position { line, character },
+                    end: Position { line, character },
+                },
+            });
+        }
+
+        // Add all impl refs
+        locations.extend(info.impl_refs.iter().filter_map(to_location));
+
+        // Add all verify refs
+        locations.extend(info.verify_refs.iter().filter_map(to_location));
+
+        // Add all depends refs
+        locations.extend(info.depends_refs.iter().filter_map(to_location));
+
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
         }
     }
 
