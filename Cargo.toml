@@ -19,21 +19,13 @@ tracey-core = { path = "crates/tracey-core", version = "1.0.0" }
 # Facet ecosystem (from git for facet-miette support)
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
 facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
+facet-axum = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
 facet-kdl = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
-facet-value = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
 facet-error = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
-facet-miette = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.41.0" }
 
 # Error handling
 eyre = "0.6"
-
-# HTML utilities
-html-escape = "0.2"
-miette = { version = "7", default-features = false, features = ["fancy-no-backtrace"] }
-
-# HTTP fetching
-ureq = "3"
 
 
 
@@ -48,11 +40,7 @@ rayon = "1"
 # Pretty output
 owo-colors = "4"
 
-# Syntax highlighting for miette
-miette-arborium = "2"
-
 # Tree-sitter parsing (for reverse traceability)
-# Note: async_tiny was removed - now using axum
 arborium = { version = "2", features = [
     "lang-rust", "lang-c", "lang-cpp", "lang-go", "lang-zig",
     "lang-javascript", "lang-typescript", "lang-tsx",
@@ -67,7 +55,6 @@ arborium-rust = "2"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "time", "process", "io-util", "macros"] }
 tower-http = { version = "0.6", features = ["cors"] }
-hyper = { version = "1" }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.28"
@@ -82,7 +69,7 @@ notify-debouncer-mini = "0.7"
 tantivy = "0.22"
 
 # Markdown processing (with syntax highlighting and diagram handlers)
-bearmark = { git = "https://github.com/bearcove/dodeca", branch = "main", features = ["highlight", "aasvg", "pikru"] }
+marq = { git = "https://github.com/bearcove/marq", features = ["highlight", "aasvg", "pikru"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

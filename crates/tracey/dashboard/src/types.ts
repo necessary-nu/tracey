@@ -1,21 +1,49 @@
+// Import auto-generated API types
+import type {
+	ApiCodeUnit,
+	ApiConfig,
+	ApiFileData,
+	ApiForwardData,
+	ApiReverseData,
+	ApiSpecData,
+	OutlineCoverage,
+	OutlineEntry,
+	SpecSection,
+} from "./api-types";
+
+// Re-export with local aliases for backwards compatibility
+export type Config = ApiConfig;
+export type ForwardData = ApiForwardData;
+export type ReverseData = ApiReverseData;
+export type FileContent = ApiFileData;
+export type CodeUnit = ApiCodeUnit;
+export type SpecContent = ApiSpecData;
+export type { OutlineCoverage, OutlineEntry, SpecSection };
+
 // Route types
-export type ViewType = 'sources' | 'spec' | 'coverage';
+export type ViewType = "sources" | "spec" | "coverage";
 
 export interface SourcesRoute {
-  view: 'sources';
+  view: "sources";
+  spec: string | null;
+  impl: string | null;
   file: string | null;
   line: number | null;
   context: string | null;
 }
 
 export interface SpecRoute {
-  view: 'spec';
+  view: "spec";
+  spec: string | null;
+  impl: string | null;
   rule: string | null;
   heading: string | null;
 }
 
 export interface CoverageRoute {
-  view: 'coverage';
+  view: "coverage";
+  spec: string | null;
+  impl: string | null;
   filter: string | null;
   level: string | null;
 }
@@ -30,7 +58,7 @@ export interface FileRef {
 
 export interface Rule {
   id: string;
-  text?: string;
+  html?: string;
   level?: string;
   implRefs: FileRef[];
   verifyRefs: FileRef[];
@@ -47,19 +75,9 @@ export interface FileInfo {
   totalUnits: number;
 }
 
-export interface Config {
-  projectRoot?: string;
-  specs?: { name: string }[];
-}
-
-export interface ForwardData {
-  specs: Spec[];
-}
-
-export interface ReverseData {
-  files: FileInfo[];
-  totalUnits: number;
-  coveredUnits: number;
+export interface SpecInfo {
+  name: string;
+  implementations: string[];
 }
 
 export interface ApiData {
@@ -68,37 +86,9 @@ export interface ApiData {
   reverse: ReverseData;
 }
 
-export interface FileContent {
-  path: string;
-  content: string;
-  /** Server-side syntax highlighted HTML */
-  html: string;
-  units: CodeUnit[];
-}
-
-export interface CodeUnit {
-  kind: string;
-  name: string | null;
-  startLine: number;
-  endLine: number;
-  ruleRefs: string[];
-}
-
-
-
-export interface SpecSection {
-  sourceFile: string;
-  html: string;
-}
-
-export interface SpecContent {
-  name: string;
-  sections: SpecSection[];
-}
-
 // Search types
 export interface SearchResult {
-  kind: 'source' | 'rule';
+  kind: "source" | "rule";
   id: string;
   line: number;
   content: string;
@@ -174,9 +164,14 @@ export interface SearchModalProps {
 
 export interface HeaderProps {
   view: ViewType;
+  spec: string | null;
+  impl: string | null;
+  config: Config;
   search: string;
   onSearchChange: (search: string) => void;
   onViewChange: (view: ViewType) => void;
+  onSpecChange: (spec: string) => void;
+  onImplChange: (impl: string) => void;
   onOpenSearch: () => void;
 }
 
@@ -184,7 +179,7 @@ export interface FilePathProps {
   file: string;
   line?: number | null;
   short?: boolean;
-  type?: 'impl' | 'verify' | 'source';
+  type?: "impl" | "verify" | "source";
   onClick?: () => void;
   className?: string;
 }
@@ -228,8 +223,12 @@ export interface SourcesViewProps {
 export interface SpecViewProps {
   config: Config;
   forward: ForwardData;
+  version: string | null;
+  selectedSpec: string | null;
+  selectedImpl: string | null;
   selectedRule: string | null;
   selectedHeading: string | null;
+  onSelectSpec: (name: string) => void;
   onSelectRule: (ruleId: string) => void;
   onSelectFile: (path: string, line?: number | null, context?: string | null) => void;
   scrollPosition: number;
@@ -246,6 +245,6 @@ export interface CodeViewProps {
 export interface FileRefProps {
   file: string;
   line: number;
-  type: 'impl' | 'verify';
+  type: "impl" | "verify";
   onSelectFile: (path: string, line?: number | null) => void;
 }

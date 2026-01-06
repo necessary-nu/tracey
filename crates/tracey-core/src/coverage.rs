@@ -1,7 +1,6 @@
 //! Coverage analysis and reporting
 
-use crate::lexer::{RefVerb, RuleReference, Rules};
-use crate::spec::SpecManifest;
+use crate::lexer::{RefVerb, ReqReference, Reqs};
 use facet::Facet;
 use std::collections::{HashMap, HashSet};
 
@@ -21,34 +20,38 @@ pub struct CoverageReport {
     pub uncovered_rules: HashSet<String>,
 
     /// References to rules that don't exist in the spec
-    pub invalid_references: Vec<RuleReference>,
+    pub invalid_references: Vec<ReqReference>,
 
     /// All valid references, grouped by rule ID
-    pub references_by_rule: HashMap<String, Vec<RuleReference>>,
+    pub references_by_rule: HashMap<String, Vec<ReqReference>>,
 
     /// References grouped by verb type, then by rule ID
-    pub references_by_verb: HashMap<RefVerb, HashMap<String, Vec<RuleReference>>>,
+    pub references_by_verb: HashMap<RefVerb, HashMap<String, Vec<ReqReference>>>,
 }
 
 impl CoverageReport {
-    /// Compute coverage from rules and manifest
+    /// Compute coverage from rules and a set of known rule IDs
     ///
-    /// [impl coverage.compute.covered]
-    /// [impl coverage.compute.uncovered]
-    /// [impl coverage.compute.invalid]
-    pub fn compute(spec_name: impl Into<String>, manifest: &SpecManifest, rules: &Rules) -> Self {
+    /// r[impl coverage.compute.covered]
+    /// r[impl coverage.compute.uncovered]
+    /// r[impl coverage.compute.invalid]
+    pub fn compute(
+        spec_name: impl Into<String>,
+        known_rule_ids: &HashSet<String>,
+        reqs: &Reqs,
+    ) -> Self {
         let spec_name = spec_name.into();
         let mut covered_rules = HashSet::new();
         let mut invalid_references = Vec::new();
-        let mut references_by_rule: HashMap<String, Vec<RuleReference>> = HashMap::new();
-        let mut references_by_verb: HashMap<RefVerb, HashMap<String, Vec<RuleReference>>> =
+        let mut references_by_rule: HashMap<String, Vec<ReqReference>> = HashMap::new();
+        let mut references_by_verb: HashMap<RefVerb, HashMap<String, Vec<ReqReference>>> =
             HashMap::new();
 
-        for reference in &rules.references {
-            if manifest.has_rule(&reference.rule_id) {
-                covered_rules.insert(reference.rule_id.clone());
+        for reference in &reqs.references {
+            if known_rule_ids.contains(&reference.req_id) {
+                covered_rules.insert(reference.req_id.clone());
                 references_by_rule
-                    .entry(reference.rule_id.clone())
+                    .entry(reference.req_id.clone())
                     .or_default()
                     .push(reference.clone());
 
@@ -56,7 +59,7 @@ impl CoverageReport {
                 references_by_verb
                     .entry(reference.verb)
                     .or_default()
-                    .entry(reference.rule_id.clone())
+                    .entry(reference.req_id.clone())
                     .or_default()
                     .push(reference.clone());
             } else {
@@ -64,13 +67,12 @@ impl CoverageReport {
             }
         }
 
-        let all_rules: HashSet<String> = manifest.rule_ids().map(|s| s.to_string()).collect();
         let uncovered_rules: HashSet<String> =
-            all_rules.difference(&covered_rules).cloned().collect();
+            known_rule_ids.difference(&covered_rules).cloned().collect();
 
         CoverageReport {
             spec_name,
-            total_rules: manifest.rules.len(),
+            total_rules: known_rule_ids.len(),
             covered_rules,
             uncovered_rules,
             invalid_references,
@@ -81,7 +83,7 @@ impl CoverageReport {
 
     /// Coverage percentage (0.0 - 100.0)
     ///
-    /// [impl coverage.compute.percentage]
+    /// r[impl coverage.compute.percentage]
     pub fn coverage_percent(&self) -> f64 {
         if self.total_rules == 0 {
             return 100.0;

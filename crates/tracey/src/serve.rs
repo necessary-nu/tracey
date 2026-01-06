@@ -21,15 +21,18 @@ use axum::{
     extract::{FromRequestParts, Query, State, WebSocketUpgrade, ws},
     http::{Method, Request, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, patch, post},
 };
 use eyre::{Result, WrapErr};
+use facet::Facet;
+use facet_axum::Json;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
 use owo_colors::OwoColorize;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,13 +40,13 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tower_http::cors::{Any, CorsLayer};
 use tracey_core::code_units::CodeUnit;
-use tracey_core::{RefVerb, Rules, SpecManifest};
+use tracey_core::{RefVerb, ReqDefinition, Reqs};
 use tracing::{debug, error, info, warn};
 
 // Markdown rendering
-use bearmark::{
-    AasvgHandler, ArboriumHandler, PikruHandler, RenderOptions, RuleDefinition, RuleHandler,
-    parse_frontmatter, render,
+use marq::{
+    AasvgHandler, ArboriumHandler, PikruHandler, RenderOptions, ReqHandler, parse_frontmatter,
+    render,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -57,130 +60,47 @@ use crate::vite::ViteServer;
 // JSON API Types
 // ============================================================================
 
-/// Project configuration info
-#[derive(Debug, Clone)]
-struct ApiConfig {
-    project_root: String,
-    specs: Vec<ApiSpecInfo>,
-}
+// Re-export API types from tracey-api crate
+pub use tracey_api::{
+    ApiCodeRef, ApiCodeUnit, ApiConfig, ApiFileData, ApiFileEntry, ApiForwardData, ApiReverseData,
+    ApiRule, ApiSpecData, ApiSpecForward, ApiSpecInfo, GitStatus, OutlineCoverage, OutlineEntry,
+    SpecSection,
+};
 
-#[derive(Debug, Clone)]
-struct ApiSpecInfo {
-    name: String,
-    /// Path to spec file(s) if local
-    source: Option<String>,
-}
-
-/// Forward traceability: rules with their code references
-#[derive(Debug, Clone)]
-struct ApiForwardData {
-    specs: Vec<ApiSpecForward>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiSpecForward {
-    name: String,
-    rules: Vec<ApiRule>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiRule {
-    id: String,
-    text: Option<String>,
-    status: Option<String>,
-    level: Option<String>,
-    source_file: Option<String>,
-    source_line: Option<usize>,
-    impl_refs: Vec<ApiCodeRef>,
-    verify_refs: Vec<ApiCodeRef>,
-    depends_refs: Vec<ApiCodeRef>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiCodeRef {
-    file: String,
-    line: usize,
-}
-
-/// Reverse traceability: file tree with coverage info
-#[derive(Debug, Clone)]
-struct ApiReverseData {
-    /// Total code units across all files
-    total_units: usize,
-    /// Code units with at least one rule reference
-    covered_units: usize,
-    /// File tree with coverage info
-    files: Vec<ApiFileEntry>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiFileEntry {
-    path: String,
-    /// Number of code units in this file
-    total_units: usize,
-    /// Number of covered code units
-    covered_units: usize,
-}
-
-/// Single file with full coverage details
-#[derive(Debug, Clone)]
-struct ApiFileData {
-    path: String,
-    content: String,
-    /// Syntax-highlighted HTML content
-    html: String,
-    /// Code units in this file with their coverage
-    units: Vec<ApiCodeUnit>,
-}
-
-#[derive(Debug, Clone)]
-struct ApiCodeUnit {
-    kind: String,
-    name: Option<String>,
-    start_line: usize,
-    end_line: usize,
-    /// Rule references found in this code unit's comments
-    rule_refs: Vec<String>,
-}
-
-/// A section of a spec (one source file)
-#[derive(Debug, Clone)]
-struct SpecSection {
-    /// Source file path
-    source_file: String,
-    /// Rendered HTML content
-    html: String,
-    /// Weight for ordering (from frontmatter)
-    weight: i32,
-}
-
-/// Spec content (may span multiple files)
-#[derive(Debug, Clone)]
-struct ApiSpecData {
-    name: String,
-    /// Sections ordered by weight
-    sections: Vec<SpecSection>,
+/// Search response
+#[derive(Debug, Clone, Facet)]
+struct ApiSearchResponse {
+    query: String,
+    results: Vec<crate::search::SearchResult>,
+    available: bool,
 }
 
 // ============================================================================
 // Server State
 // ============================================================================
 
+/// Key for implementation-specific data: (spec_name, impl_name)
+pub type ImplKey = (String, String);
+
 /// Computed dashboard data that gets rebuilt on file changes
-struct DashboardData {
-    config: ApiConfig,
-    forward: ApiForwardData,
-    reverse: ApiReverseData,
-    /// All code units indexed by file path
-    code_units_by_file: BTreeMap<PathBuf, Vec<CodeUnit>>,
-    /// Spec content by name
-    specs_content: BTreeMap<String, ApiSpecData>,
+pub struct DashboardData {
+    pub config: ApiConfig,
+    /// Forward data per implementation: (spec_name, impl_name) -> data
+    pub forward_by_impl: BTreeMap<ImplKey, ApiSpecForward>,
+    /// Reverse data per implementation: (spec_name, impl_name) -> data
+    pub reverse_by_impl: BTreeMap<ImplKey, ApiReverseData>,
+    /// Code units per implementation for file API
+    pub code_units_by_impl: BTreeMap<ImplKey, BTreeMap<PathBuf, Vec<CodeUnit>>>,
+    /// Spec content per implementation (coverage info varies by impl)
+    pub specs_content_by_impl: BTreeMap<ImplKey, ApiSpecData>,
     /// Full-text search index for source files
-    search_index: Box<dyn SearchIndex>,
+    pub search_index: Box<dyn SearchIndex>,
     /// Version number (incremented only when content actually changes)
-    version: u64,
+    pub version: u64,
     /// Hash of forward + reverse JSON for change detection
-    content_hash: u64,
+    pub content_hash: u64,
+    /// Delta from previous build (what changed)
+    pub delta: crate::server::Delta,
 }
 
 /// Shared application state
@@ -192,37 +112,6 @@ struct AppState {
     vite_port: Option<u16>,
     /// Syntax highlighter for source files
     highlighter: Arc<Mutex<arborium::Highlighter>>,
-}
-
-// ============================================================================
-// JSON Serialization (manual, no serde)
-// ============================================================================
-
-pub fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn json_opt_string(s: &Option<String>) -> String {
-    match s {
-        Some(s) => json_string(s),
-        None => "null".to_string(),
-    }
 }
 
 /// Escape HTML special characters
@@ -239,149 +128,6 @@ fn html_escape(s: &str) -> String {
         }
     }
     out
-}
-
-impl ApiConfig {
-    fn to_json(&self) -> String {
-        let specs: Vec<String> = self
-            .specs
-            .iter()
-            .map(|s| {
-                format!(
-                    r#"{{"name":{},"source":{}}}"#,
-                    json_string(&s.name),
-                    json_opt_string(&s.source)
-                )
-            })
-            .collect();
-        format!(
-            r#"{{"projectRoot":{},"specs":[{}]}}"#,
-            json_string(&self.project_root),
-            specs.join(",")
-        )
-    }
-}
-
-impl ApiCodeRef {
-    fn to_json(&self) -> String {
-        format!(
-            r#"{{"file":{},"line":{}}}"#,
-            json_string(&self.file),
-            self.line
-        )
-    }
-}
-
-impl ApiRule {
-    fn to_json(&self) -> String {
-        let impl_refs: Vec<String> = self.impl_refs.iter().map(|r| r.to_json()).collect();
-        let verify_refs: Vec<String> = self.verify_refs.iter().map(|r| r.to_json()).collect();
-        let depends_refs: Vec<String> = self.depends_refs.iter().map(|r| r.to_json()).collect();
-
-        format!(
-            r#"{{"id":{},"text":{},"status":{},"level":{},"sourceFile":{},"sourceLine":{},"implRefs":[{}],"verifyRefs":[{}],"dependsRefs":[{}]}}"#,
-            json_string(&self.id),
-            json_opt_string(&self.text),
-            json_opt_string(&self.status),
-            json_opt_string(&self.level),
-            json_opt_string(&self.source_file),
-            self.source_line
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-            impl_refs.join(","),
-            verify_refs.join(","),
-            depends_refs.join(",")
-        )
-    }
-}
-
-impl ApiForwardData {
-    fn to_json(&self) -> String {
-        let specs: Vec<String> = self
-            .specs
-            .iter()
-            .map(|s| {
-                let rules: Vec<String> = s.rules.iter().map(|r| r.to_json()).collect();
-                format!(
-                    r#"{{"name":{},"rules":[{}]}}"#,
-                    json_string(&s.name),
-                    rules.join(",")
-                )
-            })
-            .collect();
-        format!(r#"{{"specs":[{}]}}"#, specs.join(","))
-    }
-}
-
-impl ApiFileEntry {
-    fn to_json(&self) -> String {
-        format!(
-            r#"{{"path":{},"totalUnits":{},"coveredUnits":{}}}"#,
-            json_string(&self.path),
-            self.total_units,
-            self.covered_units
-        )
-    }
-}
-
-impl ApiReverseData {
-    fn to_json(&self) -> String {
-        let files: Vec<String> = self.files.iter().map(|f| f.to_json()).collect();
-        format!(
-            r#"{{"totalUnits":{},"coveredUnits":{},"files":[{}]}}"#,
-            self.total_units,
-            self.covered_units,
-            files.join(",")
-        )
-    }
-}
-
-impl ApiCodeUnit {
-    fn to_json(&self) -> String {
-        let refs: Vec<String> = self.rule_refs.iter().map(|r| json_string(r)).collect();
-        format!(
-            r#"{{"kind":{},"name":{},"startLine":{},"endLine":{},"ruleRefs":[{}]}}"#,
-            json_string(&self.kind),
-            json_opt_string(&self.name),
-            self.start_line,
-            self.end_line,
-            refs.join(",")
-        )
-    }
-}
-
-impl ApiFileData {
-    fn to_json(&self) -> String {
-        let units: Vec<String> = self.units.iter().map(|u| u.to_json()).collect();
-        format!(
-            r#"{{"path":{},"content":{},"html":{},"units":[{}]}}"#,
-            json_string(&self.path),
-            json_string(&self.content),
-            json_string(&self.html),
-            units.join(",")
-        )
-    }
-}
-
-impl SpecSection {
-    fn to_json(&self) -> String {
-        format!(
-            r#"{{"sourceFile":{},"html":{}}}"#,
-            json_string(&self.source_file),
-            json_string(&self.html)
-        )
-    }
-}
-
-impl ApiSpecData {
-    fn to_json(&self) -> String {
-        let sections: Vec<String> = self.sections.iter().map(|s| s.to_json()).collect();
-        format!(
-            r#"{{"name":{},"sections":[{}]}}"#,
-            json_string(&self.name),
-            sections.join(",")
-        )
-    }
 }
 
 // ============================================================================
@@ -401,16 +147,32 @@ struct TraceyRuleHandler {
     coverage: BTreeMap<String, RuleCoverage>,
     /// Current source file being rendered (shared with rendering loop)
     current_source_file: Arc<Mutex<String>>,
+    /// Spec name for URL generation
+    spec_name: String,
+    /// Implementation name for URL generation
+    impl_name: String,
+    /// Project root for absolute paths
+    project_root: PathBuf,
+    /// Git status for files
+    git_status: HashMap<String, GitStatus>,
 }
 
 impl TraceyRuleHandler {
     fn new(
         coverage: BTreeMap<String, RuleCoverage>,
         current_source_file: Arc<Mutex<String>>,
+        spec_name: String,
+        impl_name: String,
+        project_root: PathBuf,
+        git_status: HashMap<String, GitStatus>,
     ) -> Self {
         Self {
             coverage,
             current_source_file,
+            spec_name,
+            impl_name,
+            project_root,
+            git_status,
         }
     }
 }
@@ -476,28 +238,37 @@ fn devicon_class(path: &str) -> Option<&'static str> {
     }
 }
 
-impl RuleHandler for TraceyRuleHandler {
-    fn render<'a>(
+// r[impl markdown.html.div] - rule wrapped in <div class="rule-container">
+// r[impl markdown.html.anchor] - div has id="r-{rule.id}"
+// r[impl markdown.html.link] - rule-badge links to the rule
+// r[impl markdown.html.wbr] - dots followed by <wbr> for line breaking
+impl ReqHandler for TraceyRuleHandler {
+    fn start<'a>(
         &'a self,
-        rule: &'a RuleDefinition,
-    ) -> Pin<Box<dyn Future<Output = bearmark::Result<String>> + Send + 'a>> {
+        rule: &'a ReqDefinition,
+    ) -> Pin<Box<dyn Future<Output = marq::Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let coverage = self.coverage.get(&rule.id);
             let status = coverage.map(|c| c.status).unwrap_or("uncovered");
 
-            // Insert <wbr> after dots for better line breaking
+            // r[impl markdown.html.wbr] - insert <wbr> after dots for better line breaking
             let display_id = rule.id.replace('.', ".<wbr>");
 
-            // Get current source file for this rule
-            let source_file = self.current_source_file.lock().unwrap().clone();
+            // Get current source file for this rule (make it absolute)
+            let relative_source = self.current_source_file.lock().unwrap().clone();
+            let absolute_source = self.project_root.join(&relative_source);
+            let source_file = absolute_source.display().to_string();
 
             // Build the badges that pierce the top border
             let mut badges_html = String::new();
 
-            // Rule ID badge (always present) - includes source location for editor navigation
+            // r[impl dashboard.editing.copy.button]
+            // r[impl dashboard.links.req-links]
+            // Segmented badge group: copy button + requirement ID
             badges_html.push_str(&format!(
-                r#"<a class="rule-badge rule-id" href="/spec/{}" data-rule="{}" data-source-file="{}" data-source-line="{}" title="{}">{}</a>"#,
-                rule.id, rule.id, source_file, rule.line, rule.id, display_id
+                r#"<div class="req-badge-group"><button class="req-badge req-copy req-segment-left" data-req-id="{}" title="Copy requirement ID"><svg class="req-copy-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button><a class="req-badge req-id req-segment-right" href="/{}/{}/spec#r--{}" data-rule="{}" data-source-file="{}" data-source-line="{}" title="{}">{}</a></div>"#,
+                rule.id,
+                self.spec_name, self.impl_name, rule.id, rule.id, source_file, rule.line, rule.id, display_id
             ));
 
             // Implementation badge
@@ -513,13 +284,28 @@ impl RuleHandler for TraceyRuleHandler {
                     } else {
                         String::new()
                     };
+                    // Serialize all refs as JSON for popup (manual, no serde)
+                    let all_refs_json = cov
+                        .impl_refs
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                r#"{{"file":"{}","line":{}}}"#,
+                                r.file.replace('\\', "\\\\").replace('"', "\\\""),
+                                r.line
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let all_refs_json = format!("[{}]", all_refs_json).replace('"', "&quot;");
+                    // r[impl dashboard.links.impl-refs]
                     badges_html.push_str(&format!(
-                        r#"<a class="rule-badge rule-impl" href="/sources/{}:{}" data-file="{}" data-line="{}" title="Implementation: {}:{}">{icon}{}:{}{}</a>"#,
-                        r.file, r.line, r.file, r.line, r.file, r.line, filename, r.line, count_suffix
+                        r#"<a class="req-badge req-impl" href="/{}/{}/sources/{}:{}" data-file="{}" data-line="{}" data-all-refs="{}" title="Implementation: {}:{}">{icon}{}:{}{}</a>"#,
+                        self.spec_name, self.impl_name, r.file, r.line, r.file, r.line, all_refs_json, r.file, r.line, filename, r.line, count_suffix
                     ));
                 }
 
-                // Test/verify badge
+                // r[impl dashboard.links.verify-refs]
                 if !cov.verify_refs.is_empty() {
                     let r = &cov.verify_refs[0];
                     let filename = r.file.rsplit('/').next().unwrap_or(&r.file);
@@ -531,37 +317,124 @@ impl RuleHandler for TraceyRuleHandler {
                     } else {
                         String::new()
                     };
+                    // Serialize all refs as JSON for popup (manual, no serde)
+                    let all_refs_json = cov
+                        .verify_refs
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                r#"{{"file":"{}","line":{}}}"#,
+                                r.file.replace('\\', "\\\\").replace('"', "\\\""),
+                                r.line
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let all_refs_json = format!("[{}]", all_refs_json).replace('"', "&quot;");
                     badges_html.push_str(&format!(
-                        r#"<a class="rule-badge rule-test" href="/sources/{}:{}" data-file="{}" data-line="{}" title="Test: {}:{}">{icon}{}:{}{}</a>"#,
-                        r.file, r.line, r.file, r.line, r.file, r.line, filename, r.line, count_suffix
+                        r#"<a class="req-badge req-test" href="/{}/{}/sources/{}:{}" data-file="{}" data-line="{}" data-all-refs="{}" title="Test: {}:{}">{icon}{}:{}{}</a>"#,
+                        self.spec_name, self.impl_name, r.file, r.line, r.file, r.line, all_refs_json, r.file, r.line, filename, r.line, count_suffix
                     ));
                 }
             }
 
-            // Render the rule container with paragraph content
+            // Edit badge - separate group on the right
+            let edit_badge_html = format!(
+                r#"<button class="req-badge req-edit" data-br="{}-{}" data-source-file="{}" title="Edit this requirement"><svg class="req-edit-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg> Edit</button>"#,
+                rule.span.offset,
+                rule.span.offset + rule.span.length,
+                source_file
+            );
+
+            // Render the opening of the req container
             Ok(format!(
-                r#"<div class="rule-container rule-{status}" id="{anchor}">
-<div class="rule-badges">{badges}</div>
-<div class="rule-content">{paragraph}</div>
-</div>"#,
+                r#"<div class="req-container req-{status}" id="{anchor}" data-br="{br_start}-{br_end}">
+<div class="req-badges-left">{badges}</div>
+<div class="req-badges-right">{edit_badge}</div>
+<div class="req-content">"#,
                 status = status,
                 anchor = rule.anchor_id,
+                br_start = rule.span.offset,
+                br_end = rule.span.offset + rule.span.length,
                 badges = badges_html,
-                paragraph = rule.paragraph_html
+                edit_badge = edit_badge_html,
             ))
         })
     }
+
+    fn end<'a>(
+        &'a self,
+        _rule: &'a ReqDefinition,
+    ) -> Pin<Box<dyn Future<Output = marq::Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            // Close the rule container
+            Ok("</div>\n</div>".to_string())
+        })
+    }
+}
+
+// ============================================================================
+// Git Status
+// ============================================================================
+
+/// Get git status for all files in the repository
+/// Returns a map of file path -> GitStatus
+fn get_git_status(project_root: &Path) -> HashMap<String, GitStatus> {
+    let mut status_map = HashMap::new();
+
+    // Run git status --porcelain to get file statuses
+    let output = match std::process::Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return status_map, // Not a git repo or git not available
+    };
+
+    if !output.status.success() {
+        return status_map;
+    }
+
+    let status_text = String::from_utf8_lossy(&output.stdout);
+    for line in status_text.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+
+        // Git status --porcelain format: "XY filename"
+        // X = index status, Y = working tree status
+        let index_status = line.chars().next().unwrap_or(' ');
+        let worktree_status = line.chars().nth(1).unwrap_or(' ');
+        let filename = line[3..].trim().to_string();
+
+        let status = if worktree_status != ' ' && worktree_status != '?' {
+            // Working tree has changes (dirty)
+            GitStatus::Dirty
+        } else if index_status != ' ' && index_status != '?' {
+            // Changes staged in index
+            GitStatus::Staged
+        } else {
+            // Clean or unknown
+            GitStatus::Clean
+        };
+
+        status_map.insert(filename, status);
+    }
+
+    status_map
 }
 
 // ============================================================================
 // Data Building
 // ============================================================================
 
-async fn build_dashboard_data(
+pub async fn build_dashboard_data(
     project_root: &Path,
-    config_path: &Path,
     config: &Config,
     version: u64,
+    quiet: bool,
 ) -> Result<DashboardData> {
     use tracey_core::WalkSources;
     use tracey_core::code_units::extract_rust;
@@ -570,249 +443,304 @@ async fn build_dashboard_data(
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
 
-    let config_dir = config_path
-        .parent()
-        .ok_or_else(|| eyre::eyre!("Config path has no parent directory"))?;
-
     let mut api_config = ApiConfig {
         project_root: abs_root.display().to_string(),
         specs: Vec::new(),
     };
 
-    let mut forward_specs = Vec::new();
-    let mut code_units_by_file: BTreeMap<PathBuf, Vec<CodeUnit>> = BTreeMap::new();
-    let mut specs_content: BTreeMap<String, ApiSpecData> = BTreeMap::new();
+    let mut forward_by_impl: BTreeMap<ImplKey, ApiSpecForward> = BTreeMap::new();
+    let mut reverse_by_impl: BTreeMap<ImplKey, ApiReverseData> = BTreeMap::new();
+    let mut code_units_by_impl: BTreeMap<ImplKey, BTreeMap<PathBuf, Vec<CodeUnit>>> =
+        BTreeMap::new();
+    let mut specs_content_by_impl: BTreeMap<ImplKey, ApiSpecData> = BTreeMap::new();
+    let mut all_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut all_search_rules: Vec<search::RuleEntry> = Vec::new();
 
     for spec_config in &config.specs {
         let spec_name = &spec_config.name.value;
+        let include_patterns: Vec<&str> = spec_config
+            .include
+            .iter()
+            .map(|i| i.pattern.as_str())
+            .collect();
+
+        // Validate that spec has at least one implementation
+        if spec_config.impls.is_empty() {
+            return Err(eyre::eyre!(
+                "Spec '{}' has no implementations defined.\n\n\
+                Add at least one impl block to your config:\n\n\
+                spec {{\n    \
+                    name \"{}\"\n    \
+                    prefix \"{}\"\n    \
+                    include \"docs/spec/**/*.md\"\n\n    \
+                    impl {{\n        \
+                        name \"main\"\n        \
+                        include \"src/**/*.rs\"\n    \
+                    }}\n\
+                }}",
+                spec_name,
+                spec_name,
+                spec_config.prefix.value
+            ));
+        }
 
         api_config.specs.push(ApiSpecInfo {
             name: spec_name.clone(),
-            source: spec_config.rules_glob.as_ref().map(|g| g.pattern.clone()),
+            prefix: spec_config.prefix.value.clone(),
+            source: Some(include_patterns.join(", ")),
+            implementations: spec_config
+                .impls
+                .iter()
+                .map(|i| i.name.value.clone())
+                .collect(),
         });
 
-        // Load manifest
-        let manifest: SpecManifest = if let Some(rules_url) = &spec_config.rules_url {
+        // Extract requirements directly from markdown files (shared across impls)
+        if !quiet {
             eprintln!(
-                "   {} manifest from {}",
-                "Fetching".green(),
-                rules_url.value
+                "   {} requirements from {:?}",
+                "Extracting".green(),
+                include_patterns
             );
-            SpecManifest::fetch(&rules_url.value)?
-        } else if let Some(rules_file) = &spec_config.rules_file {
-            let path = config_dir.join(&rules_file.path);
-            SpecManifest::load(&path)?
-        } else if let Some(glob) = &spec_config.rules_glob {
-            eprintln!("   {} rules from {}", "Extracting".green(), glob.pattern);
-            crate::load_manifest_from_glob(project_root, &glob.pattern)?
-        } else {
-            eyre::bail!(
-                "Spec '{}' has no rules_url, rules_file, or rules_glob",
-                spec_name
-            );
-        };
+        }
+        let extracted_rules =
+            crate::load_rules_from_globs(project_root, &include_patterns, quiet).await?;
 
-        // Scan source files
-        let include: Vec<String> = if spec_config.include.is_empty() {
-            vec!["**/*.rs".to_string()]
-        } else {
-            spec_config
-                .include
+        // Build data for each implementation
+        for impl_config in &spec_config.impls {
+            let impl_name = &impl_config.name.value;
+            let impl_key: ImplKey = (spec_name.clone(), impl_name.clone());
+
+            if !quiet {
+                eprintln!("   {} {} implementation", "Scanning".green(), impl_name);
+            }
+
+            // Get include/exclude patterns for this impl
+            // r[impl walk.default-include] - default to **/*.rs when no include patterns
+            let include: Vec<String> = if impl_config.include.is_empty() {
+                vec!["**/*.rs".to_string()]
+            } else {
+                impl_config
+                    .include
+                    .iter()
+                    .map(|inc| inc.pattern.clone())
+                    .collect()
+            };
+            let exclude: Vec<String> = impl_config
+                .exclude
                 .iter()
-                .map(|i| i.pattern.clone())
-                .collect()
-        };
-        let exclude: Vec<String> = spec_config
-            .exclude
-            .iter()
-            .map(|e| e.pattern.clone())
-            .collect();
+                .map(|exc| exc.pattern.clone())
+                .collect();
 
-        let rules = Rules::extract(
-            WalkSources::new(project_root)
-                .include(include.clone())
-                .exclude(exclude.clone()),
-        )?;
+            // r[impl ref.cross-workspace.paths]
+            // Extract requirement references from this impl's source files
+            let extraction_result = Reqs::extract(
+                WalkSources::new(project_root)
+                    .include(include.clone())
+                    .exclude(exclude.clone()),
+            )?;
 
-        // Build forward data for this spec
-        let mut api_rules = Vec::new();
-        for (rule_id, rule_info) in &manifest.rules {
-            let mut impl_refs = Vec::new();
-            let mut verify_refs = Vec::new();
-            let mut depends_refs = Vec::new();
-
-            for r in &rules.references {
-                if r.rule_id == *rule_id {
-                    let relative = r.file.strip_prefix(project_root).unwrap_or(&r.file);
-                    let code_ref = ApiCodeRef {
-                        file: relative.display().to_string(),
-                        line: r.line,
-                    };
-                    match r.verb {
-                        RefVerb::Impl | RefVerb::Define => impl_refs.push(code_ref),
-                        RefVerb::Verify => verify_refs.push(code_ref),
-                        RefVerb::Depends | RefVerb::Related => depends_refs.push(code_ref),
-                    }
+            // r[impl ref.cross-workspace.cli-warnings]
+            // Print warnings for missing cross-workspace paths
+            for warning in &extraction_result.warnings {
+                if !quiet {
+                    eprintln!("{}", warning.yellow());
                 }
             }
 
-            api_rules.push(ApiRule {
-                id: rule_id.clone(),
-                text: rule_info.text.clone(),
-                status: rule_info.status.clone(),
-                level: rule_info.level.clone(),
-                source_file: rule_info.source_file.clone(),
-                source_line: rule_info.source_line,
-                impl_refs,
-                verify_refs,
-                depends_refs,
-            });
-        }
+            let reqs = extraction_result.reqs;
 
-        // Sort rules by ID
-        api_rules.sort_by(|a, b| a.id.cmp(&b.id));
+            // Build forward data for this impl
+            let mut api_rules = Vec::new();
+            for (rule_def, source_file) in &extracted_rules {
+                let mut impl_refs = Vec::new();
+                let mut verify_refs = Vec::new();
+                let mut depends_refs = Vec::new();
 
-        // Build coverage map for this spec's rules
-        let mut coverage: BTreeMap<String, RuleCoverage> = BTreeMap::new();
-        for rule in &api_rules {
-            let has_impl = !rule.impl_refs.is_empty();
-            let has_verify = !rule.verify_refs.is_empty();
-            let status = if has_impl && has_verify {
-                "covered"
-            } else if has_impl || has_verify {
-                "partial"
-            } else {
-                "uncovered"
-            };
-            coverage.insert(
-                rule.id.clone(),
-                RuleCoverage {
-                    status,
-                    impl_refs: rule.impl_refs.clone(),
-                    verify_refs: rule.verify_refs.clone(),
-                },
-            );
-        }
+                for r in &reqs.references {
+                    if r.req_id == rule_def.id {
+                        let relative = r.file.strip_prefix(project_root).unwrap_or(&r.file);
+                        let code_ref = ApiCodeRef {
+                            file: relative.display().to_string(),
+                            line: r.line,
+                        };
+                        match r.verb {
+                            RefVerb::Impl | RefVerb::Define => impl_refs.push(code_ref),
+                            RefVerb::Verify => verify_refs.push(code_ref),
+                            RefVerb::Depends | RefVerb::Related => depends_refs.push(code_ref),
+                        }
+                    }
+                }
 
-        // Load spec content with coverage-aware rendering (only for rules_glob sources)
-        if let Some(glob) = &spec_config.rules_glob {
+                api_rules.push(ApiRule {
+                    id: rule_def.id.clone(),
+                    html: rule_def.html.clone(),
+                    status: rule_def.metadata.status.map(|s| s.as_str().to_string()),
+                    level: rule_def.metadata.level.map(|l| l.as_str().to_string()),
+                    source_file: Some(source_file.clone()),
+                    source_line: Some(rule_def.line),
+                    impl_refs,
+                    verify_refs,
+                    depends_refs,
+                });
+            }
+
+            // Sort rules by ID
+            api_rules.sort_by(|a, b| a.id.cmp(&b.id));
+
+            // Collect rules for search index (deduplicated later)
+            for r in &api_rules {
+                all_search_rules.push(search::RuleEntry {
+                    id: r.id.clone(),
+                    html: r.html.clone(),
+                });
+            }
+
+            // Build coverage map for this impl
+            let mut coverage: BTreeMap<String, RuleCoverage> = BTreeMap::new();
+            for rule in &api_rules {
+                let has_impl = !rule.impl_refs.is_empty();
+                let has_verify = !rule.verify_refs.is_empty();
+                let status = if has_impl && has_verify {
+                    "covered"
+                } else if has_impl || has_verify {
+                    "partial"
+                } else {
+                    "uncovered"
+                };
+                coverage.insert(
+                    rule.id.clone(),
+                    RuleCoverage {
+                        status,
+                        impl_refs: rule.impl_refs.clone(),
+                        verify_refs: rule.verify_refs.clone(),
+                    },
+                );
+            }
+
+            // Load spec content with coverage-aware rendering for this impl
+            let mut impl_specs_content: BTreeMap<String, ApiSpecData> = BTreeMap::new();
             load_spec_content(
                 project_root,
-                &glob.pattern,
+                &include_patterns,
                 spec_name,
+                impl_name,
                 &coverage,
-                &mut specs_content,
+                &mut impl_specs_content,
             )
             .await?;
-        }
+            if let Some(spec_data) = impl_specs_content.remove(spec_name) {
+                specs_content_by_impl.insert(impl_key.clone(), spec_data);
+            }
 
-        forward_specs.push(ApiSpecForward {
-            name: spec_name.clone(),
-            rules: api_rules,
-        });
+            forward_by_impl.insert(
+                impl_key.clone(),
+                ApiSpecForward {
+                    name: spec_name.clone(),
+                    rules: api_rules,
+                },
+            );
 
-        // Extract code units for reverse traceability
-        let walker = ignore::WalkBuilder::new(project_root)
-            .follow_links(true)
-            .hidden(false)
-            .git_ignore(true)
-            .build();
+            // Extract code units for reverse traceability
+            let mut impl_code_units: BTreeMap<PathBuf, Vec<CodeUnit>> = BTreeMap::new();
+            let walker = ignore::WalkBuilder::new(project_root)
+                .follow_links(true)
+                .hidden(false)
+                .git_ignore(true)
+                .build();
 
-        for entry in walker.flatten() {
-            let path = entry.path();
+            for entry in walker.flatten() {
+                let path = entry.path();
 
-            if path.extension().is_some_and(|e| e == "rs") {
-                // Check include/exclude
-                let relative = path.strip_prefix(project_root).unwrap_or(path);
-                let relative_str = relative.to_string_lossy();
+                if path.extension().is_some_and(|e| e == "rs") {
+                    let relative = path.strip_prefix(project_root).unwrap_or(path);
+                    let relative_str = relative.to_string_lossy();
 
-                let included = include
-                    .iter()
-                    .any(|pattern| glob_match(&relative_str, pattern));
+                    let included = include
+                        .iter()
+                        .any(|pattern| glob_match(&relative_str, pattern));
 
-                let excluded = exclude
-                    .iter()
-                    .any(|pattern| glob_match(&relative_str, pattern));
+                    let excluded = exclude
+                        .iter()
+                        .any(|pattern| glob_match(&relative_str, pattern));
 
-                if included
-                    && !excluded
-                    && let Ok(content) = std::fs::read_to_string(path)
-                {
-                    let code_units = extract_rust(path, &content);
-                    if !code_units.is_empty() {
-                        code_units_by_file.insert(path.to_path_buf(), code_units.units);
+                    if included
+                        && !excluded
+                        && let Ok(content) = std::fs::read_to_string(path)
+                    {
+                        let code_units = extract_rust(path, &content);
+                        if !code_units.is_empty() {
+                            impl_code_units.insert(path.to_path_buf(), code_units.units);
+                        }
+                        // Also collect for search index
+                        all_file_contents.insert(path.to_path_buf(), content);
                     }
                 }
             }
+
+            // Build reverse data for this impl
+            let mut total_units = 0;
+            let mut covered_units = 0;
+            let mut file_entries = Vec::new();
+
+            for (path, units) in &impl_code_units {
+                let relative = path.strip_prefix(project_root).unwrap_or(path);
+                let file_total = units.len();
+                let file_covered = units.iter().filter(|u| !u.req_refs.is_empty()).count();
+
+                total_units += file_total;
+                covered_units += file_covered;
+
+                file_entries.push(ApiFileEntry {
+                    path: relative.display().to_string(),
+                    total_units: file_total,
+                    covered_units: file_covered,
+                });
+            }
+
+            file_entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+            reverse_by_impl.insert(
+                impl_key.clone(),
+                ApiReverseData {
+                    total_units,
+                    covered_units,
+                    files: file_entries,
+                },
+            );
+
+            code_units_by_impl.insert(impl_key, impl_code_units);
         }
     }
 
-    // Build reverse data summary and collect file contents for search
-    let mut total_units = 0;
-    let mut covered_units = 0;
-    let mut file_entries = Vec::new();
-    let mut file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // Deduplicate search rules by ID
+    all_search_rules.sort_by(|a, b| a.id.cmp(&b.id));
+    all_search_rules.dedup_by(|a, b| a.id == b.id);
 
-    for (path, units) in &code_units_by_file {
-        let relative = path.strip_prefix(project_root).unwrap_or(path);
-        let file_total = units.len();
-        let file_covered = units.iter().filter(|u| !u.rule_refs.is_empty()).count();
+    // Build search index with all sources and rules
+    let search_index = search::build_index(project_root, &all_file_contents, &all_search_rules);
 
-        total_units += file_total;
-        covered_units += file_covered;
-
-        file_entries.push(ApiFileEntry {
-            path: relative.display().to_string(),
-            total_units: file_total,
-            covered_units: file_covered,
-        });
-
-        // Load file content for search index
-        if let Ok(content) = std::fs::read_to_string(path) {
-            file_contents.insert(path.clone(), content);
-        }
+    // Compute content hash for change detection (hash all forward/reverse data)
+    let mut content_hash: u64 = 0;
+    for (key, forward) in &forward_by_impl {
+        let json = facet_json::to_string(forward).unwrap_or_default();
+        content_hash ^= simple_hash(&format!("{:?}:{}", key, json));
     }
-
-    // Sort files by path
-    file_entries.sort_by(|a, b| a.path.cmp(&b.path));
-
-    // Collect all rules for search index
-    let search_rules: Vec<search::RuleEntry> = forward_specs
-        .iter()
-        .flat_map(|spec| {
-            spec.rules.iter().map(|r| search::RuleEntry {
-                id: r.id.clone(),
-                text: r.text.clone(),
-            })
-        })
-        .collect();
-
-    // Build search index with sources and rules
-    let search_index = search::build_index(project_root, &file_contents, &search_rules);
-
-    let forward = ApiForwardData {
-        specs: forward_specs,
-    };
-    let reverse = ApiReverseData {
-        total_units,
-        covered_units,
-        files: file_entries,
-    };
-
-    // Compute content hash for change detection
-    let forward_json = forward.to_json();
-    let reverse_json = reverse.to_json();
-    let content_hash = simple_hash(&forward_json) ^ simple_hash(&reverse_json);
+    for (key, reverse) in &reverse_by_impl {
+        let json = facet_json::to_string(reverse).unwrap_or_default();
+        content_hash ^= simple_hash(&format!("{:?}:{}", key, json));
+    }
 
     Ok(DashboardData {
         config: api_config,
-        forward,
-        reverse,
-        code_units_by_file,
-        specs_content,
+        forward_by_impl,
+        reverse_by_impl,
+        code_units_by_impl,
+        specs_content_by_impl,
         search_index,
         version,
         content_hash,
+        delta: crate::server::Delta::default(),
     })
 }
 
@@ -828,8 +756,9 @@ fn simple_hash(s: &str) -> u64 {
 
 async fn load_spec_content(
     root: &Path,
-    pattern: &str,
+    patterns: &[&str],
     spec_name: &str,
+    impl_name: &str,
     coverage: &BTreeMap<String, RuleCoverage>,
     specs_content: &mut BTreeMap<String, ApiSpecData>,
 ) -> Result<()> {
@@ -838,13 +767,22 @@ async fn load_spec_content(
     // Shared source file tracker for rule handler
     let current_source_file = Arc::new(Mutex::new(String::new()));
 
-    // Set up bearmark handlers for consistent rendering with coverage-aware rule rendering
-    let rule_handler = TraceyRuleHandler::new(coverage.clone(), Arc::clone(&current_source_file));
+    // Set up marq handlers for consistent rendering with coverage-aware rule rendering
+    // TODO: Add real git status checking
+    let git_status = HashMap::new();
+    let rule_handler = TraceyRuleHandler::new(
+        coverage.clone(),
+        Arc::clone(&current_source_file),
+        spec_name.to_string(),
+        impl_name.to_string(),
+        root.to_path_buf(),
+        git_status,
+    );
     let opts = RenderOptions::new()
         .with_default_handler(ArboriumHandler::new())
         .with_handler(&["aasvg"], AasvgHandler::new())
         .with_handler(&["pikchr"], PikruHandler::new())
-        .with_rule_handler(rule_handler);
+        .with_req_handler(rule_handler);
 
     // Collect all matching files with their content and weight
     let mut files: Vec<(String, String, i32)> = Vec::new(); // (relative_path, content, weight)
@@ -865,7 +803,9 @@ async fn load_spec_content(
         let relative = path.strip_prefix(root).unwrap_or(path);
         let relative_str = relative.to_string_lossy().to_string();
 
-        if !glob_match(&relative_str, pattern) {
+        // Check if path matches any of the patterns
+        let matches_any = patterns.iter().any(|p| glob_match(&relative_str, p));
+        if !matches_any {
             continue;
         }
 
@@ -882,18 +822,42 @@ async fn load_spec_content(
     // Sort by weight
     files.sort_by_key(|(_, _, weight)| *weight);
 
-    // Render each file and build sections
+    // Concatenate all markdown files to render as one document
+    // This ensures heading IDs are hierarchical across all files
+    let mut combined_markdown = String::new();
+    let mut first_source_file = String::new();
+
+    for (i, (source_file, content, _weight)) in files.iter().enumerate() {
+        if i == 0 {
+            first_source_file = source_file.clone();
+        }
+        combined_markdown.push_str(content);
+        combined_markdown.push_str("\n\n"); // Ensure separation between files
+    }
+
+    // Render the combined document once (so heading_stack works across files)
+    // Set source_path so paragraphs get data-source-file attributes for click-to-edit
+    // Must use absolute path for editor navigation to work correctly
+    *current_source_file.lock().unwrap() = first_source_file.clone();
+    let absolute_source_path = root.join(&first_source_file).display().to_string();
+    let opts = opts.with_source_path(&absolute_source_path);
+    let doc = render(&combined_markdown, &opts).await?;
+
+    // Create a single section with all content
+    // (Frontend concatenates sections anyway, this just simplifies tracking)
     let mut sections = Vec::new();
-    for (source_file, content, weight) in files {
-        // Update the current source file so rule handler can include it in data attributes
-        *current_source_file.lock().unwrap() = source_file.clone();
-        let doc = render(&content, &opts).await?;
+    if !files.is_empty() {
         sections.push(SpecSection {
-            source_file,
+            source_file: first_source_file,
             html: doc.html,
-            weight,
+            weight: files[0].2,
         });
     }
+
+    let all_elements = doc.elements;
+
+    // Build outline from elements
+    let outline = build_outline(&all_elements, coverage);
 
     if !sections.is_empty() {
         specs_content.insert(
@@ -901,11 +865,90 @@ async fn load_spec_content(
             ApiSpecData {
                 name: spec_name.to_string(),
                 sections,
+                outline,
             },
         );
     }
 
     Ok(())
+}
+
+/// Build an outline with coverage info from document elements.
+/// Returns a flat list of outline entries with both direct and aggregated coverage.
+fn build_outline(
+    elements: &[marq::DocElement],
+    coverage: &BTreeMap<String, RuleCoverage>,
+) -> Vec<OutlineEntry> {
+    use marq::DocElement;
+
+    // First pass: collect headings with their direct rule coverage
+    let mut entries: Vec<OutlineEntry> = Vec::new();
+    let mut current_heading_idx: Option<usize> = None;
+
+    for element in elements {
+        match element {
+            DocElement::Heading(h) => {
+                entries.push(OutlineEntry {
+                    title: h.title.clone(),
+                    slug: h.id.clone(),
+                    level: h.level,
+                    coverage: OutlineCoverage::default(),
+                    aggregated: OutlineCoverage::default(),
+                });
+                current_heading_idx = Some(entries.len() - 1);
+            }
+            DocElement::Req(r) => {
+                if let Some(idx) = current_heading_idx {
+                    let cov = coverage.get(&r.id);
+                    let has_impl = cov.is_some_and(|c| !c.impl_refs.is_empty());
+                    let has_verify = cov.is_some_and(|c| !c.verify_refs.is_empty());
+
+                    entries[idx].coverage.total += 1;
+                    if has_impl {
+                        entries[idx].coverage.impl_count += 1;
+                    }
+                    if has_verify {
+                        entries[idx].coverage.verify_count += 1;
+                    }
+                }
+            }
+            DocElement::Paragraph(_) => {
+                // Paragraphs don't contribute to outline coverage
+            }
+        }
+    }
+
+    // Second pass: aggregate coverage up the hierarchy
+    // For each heading, its aggregated coverage includes:
+    // - Its own direct coverage
+    // - All coverage from headings with higher level numbers (deeper nesting) that follow it
+    //   until we hit a heading with the same or lower level number
+
+    // Start with direct coverage as the base for aggregated
+    for entry in &mut entries {
+        entry.aggregated = entry.coverage.clone();
+    }
+
+    // Process in reverse order to propagate child coverage up to parents
+    for i in (0..entries.len()).rev() {
+        let current_level = entries[i].level;
+
+        // Look forward to find all children (headings with higher level until we hit same/lower level)
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].level > current_level {
+            // Only aggregate immediate children (next level down)
+            // Children already have their subtree aggregated from the reverse pass
+            if entries[j].level == current_level + 1 {
+                let child_agg = entries[j].aggregated.clone();
+                entries[i].aggregated.total += child_agg.total;
+                entries[i].aggregated.impl_count += child_agg.impl_count;
+                entries[i].aggregated.verify_count += child_agg.verify_count;
+            }
+            j += 1;
+        }
+    }
+
+    entries
 }
 
 /// Simple glob pattern matching
@@ -951,19 +994,96 @@ const CSS_BUNDLE: &str = include_str!("../dashboard/dist/assets/index.css");
 // Route Handlers
 // ============================================================================
 
-async fn api_config(State(state): State<AppState>) -> impl IntoResponse {
+async fn api_config(State(state): State<AppState>) -> Json<ApiConfig> {
     let data = state.data.borrow().clone();
-    json_response(data.config.to_json())
+    Json(data.config.clone())
 }
 
-async fn api_forward(State(state): State<AppState>) -> impl IntoResponse {
-    let data = state.data.borrow().clone();
-    json_response(data.forward.to_json())
+/// Helper to extract spec and impl from query params, with defaults
+fn get_impl_key(params: &[(String, String)], config: &ApiConfig) -> Option<ImplKey> {
+    let spec = params
+        .iter()
+        .find(|(k, _)| k == "spec")
+        .map(|(_, v)| v.clone())
+        .or_else(|| config.specs.first().map(|s| s.name.clone()))?;
+
+    let impl_name = params
+        .iter()
+        .find(|(k, _)| k == "impl")
+        .map(|(_, v)| v.clone())
+        .or_else(|| {
+            config
+                .specs
+                .iter()
+                .find(|s| s.name == spec)
+                .and_then(|s| s.implementations.first().cloned())
+        })?;
+
+    Some((spec, impl_name))
 }
 
-async fn api_reverse(State(state): State<AppState>) -> impl IntoResponse {
+async fn api_forward(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> impl IntoResponse {
     let data = state.data.borrow().clone();
-    json_response(data.reverse.to_json())
+
+    let Some(impl_key) = get_impl_key(&params, &data.config) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .unwrap()
+            .into_response();
+    };
+
+    if let Some(forward) = data.forward_by_impl.get(&impl_key) {
+        // Wrap in ApiForwardData for backward compatibility
+        Json(ApiForwardData {
+            specs: vec![forward.clone()],
+        })
+        .into_response()
+    } else {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"error":"Implementation not found: {} {}"}}"#,
+                impl_key.0, impl_key.1
+            )))
+            .unwrap()
+            .into_response()
+    }
+}
+
+async fn api_reverse(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    let data = state.data.borrow().clone();
+
+    let Some(impl_key) = get_impl_key(&params, &data.config) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .unwrap()
+            .into_response();
+    };
+
+    if let Some(reverse) = data.reverse_by_impl.get(&impl_key) {
+        Json(reverse.clone()).into_response()
+    } else {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"error":"Implementation not found: {} {}"}}"#,
+                impl_key.0, impl_key.1
+            )))
+            .unwrap()
+            .into_response()
+    }
 }
 
 async fn api_version(State(state): State<AppState>) -> impl IntoResponse {
@@ -974,6 +1094,77 @@ async fn api_version(State(state): State<AppState>) -> impl IntoResponse {
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(format!(r#"{{"version":{}}}"#, data.version)))
         .unwrap()
+}
+
+/// Delta response for the API
+#[derive(Debug, Clone, Facet)]
+#[facet(rename_all = "camelCase")]
+struct ApiDeltaResponse {
+    /// Version when this delta was computed
+    version: u64,
+    /// Summary string of changes
+    summary: String,
+    /// Whether there are any changes
+    has_changes: bool,
+    /// Detailed changes per spec/impl
+    changes: Vec<ApiImplDelta>,
+}
+
+#[derive(Debug, Clone, Facet)]
+#[facet(rename_all = "camelCase")]
+struct ApiImplDelta {
+    /// Spec/impl key (e.g., "my-spec/rust")
+    key: String,
+    /// Coverage percentage change
+    coverage_change: f64,
+    /// Rules that became covered
+    newly_covered: Vec<ApiCoverageChange>,
+    /// Rules that lost coverage
+    newly_uncovered: Vec<String>,
+}
+
+#[derive(Debug, Clone, Facet)]
+#[facet(rename_all = "camelCase")]
+struct ApiCoverageChange {
+    rule_id: String,
+    file: String,
+    line: usize,
+    ref_type: String,
+}
+
+async fn api_delta(State(state): State<AppState>) -> impl IntoResponse {
+    let data = state.data.borrow().clone();
+    let delta = &data.delta;
+
+    let changes: Vec<ApiImplDelta> = delta
+        .by_impl
+        .iter()
+        .filter(|(_, d)| !d.is_empty())
+        .map(|(key, d)| ApiImplDelta {
+            key: key.clone(),
+            coverage_change: d.coverage_change(),
+            newly_covered: d
+                .newly_covered
+                .iter()
+                .map(|c| ApiCoverageChange {
+                    rule_id: c.rule_id.clone(),
+                    file: c.file.clone(),
+                    line: c.line,
+                    ref_type: c.ref_type.clone(),
+                })
+                .collect(),
+            newly_uncovered: d.newly_uncovered.clone(),
+        })
+        .collect();
+
+    let response = ApiDeltaResponse {
+        version: data.version,
+        summary: delta.summary(),
+        has_changes: !delta.is_empty(),
+        changes,
+    };
+
+    Json(response)
 }
 
 #[derive(Debug)]
@@ -1054,7 +1245,29 @@ async fn api_file(
     let full_path = state.project_root.join(file_path.as_ref());
     let data = state.data.borrow().clone();
 
-    if let Some(units) = data.code_units_by_file.get(&full_path) {
+    // Get impl key to find the right code units map
+    let Some(impl_key) = get_impl_key(&params, &data.config) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .unwrap()
+            .into_response();
+    };
+
+    let Some(code_units_by_file) = data.code_units_by_impl.get(&impl_key) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"error":"Implementation not found: {} {}"}}"#,
+                impl_key.0, impl_key.1
+            )))
+            .unwrap()
+            .into_response();
+    };
+
+    if let Some(units) = code_units_by_file.get(&full_path) {
         let content = std::fs::read_to_string(&full_path).unwrap_or_default();
         let relative = full_path
             .strip_prefix(&state.project_root)
@@ -1080,7 +1293,7 @@ async fn api_file(
                 name: u.name.clone(),
                 start_line: u.start_line,
                 end_line: u.end_line,
-                rule_refs: u.rule_refs.clone(),
+                rule_refs: u.req_refs.clone(),
             })
             .collect();
 
@@ -1091,13 +1304,264 @@ async fn api_file(
             units: api_units,
         };
 
-        json_response(file_data.to_json())
+        Json(file_data).into_response()
     } else {
         Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"error":"File not found"}"#))
             .unwrap()
+            .into_response()
+    }
+}
+
+/// Response for file range queries
+// r[impl dashboard.editing.api.fetch-range-response]
+#[derive(Debug, Clone, Facet)]
+struct ApiFileRange {
+    content: String,
+    start: usize,
+    end: usize,
+    file_hash: String,
+}
+
+/// Error response
+#[derive(Debug, Clone, Facet)]
+struct ApiError {
+    error: String,
+}
+
+/// Response for git check
+// r[impl dashboard.editing.git.api]
+#[derive(Debug, Clone, Facet)]
+struct ApiGitCheck {
+    in_git: bool,
+}
+
+/// Helper function to check if a file is in a git repository
+// r[impl dashboard.editing.git.check-required]
+fn is_file_in_git(file_path: &std::path::Path) -> bool {
+    // Check if the file exists
+    if !file_path.exists() {
+        return false;
+    }
+
+    // Get the directory containing the file
+    let dir = if file_path.is_dir() {
+        file_path
+    } else {
+        file_path.parent().unwrap_or(file_path)
+    };
+
+    // Run `git rev-parse --is-inside-work-tree` in the file's directory
+    std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// GET `/api/check-git?path=<path>`
+///
+/// Check if a file is in a git repository
+async fn api_check_git(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    let path = params
+        .iter()
+        .find(|(k, _)| k == "path")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+
+    let file_path = urlencoding::decode(&path).unwrap_or_default();
+    let full_path = state.project_root.join(file_path.as_ref());
+
+    Json(ApiGitCheck {
+        in_git: is_file_in_git(&full_path),
+    })
+    .into_response()
+}
+
+/// GET `/api/file-range?path=<path>&start=<byte-start>&end=<byte-end>`
+///
+/// Fetch a byte range from a file
+// r[impl dashboard.editing.api.fetch-range]
+// r[impl dashboard.editing.api.range-validation]
+// r[impl dashboard.editing.api.utf8-validation]
+async fn api_file_range(
+    State(state): State<AppState>,
+    Query(params): Query<Vec<(String, String)>>,
+) -> impl IntoResponse {
+    let path = params
+        .iter()
+        .find(|(k, _)| k == "path")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+
+    let start: usize = params
+        .iter()
+        .find(|(k, _)| k == "start")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+
+    let end: usize = params
+        .iter()
+        .find(|(k, _)| k == "end")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+
+    let file_path = urlencoding::decode(&path).unwrap_or_default();
+    let full_path = state.project_root.join(file_path.as_ref());
+
+    if let Ok(content) = std::fs::read(&full_path) {
+        if end > start && end <= content.len() {
+            let range_bytes = &content[start..end];
+            if let Ok(text) = String::from_utf8(range_bytes.to_vec()) {
+                // r[impl dashboard.editing.api.fetch-range-response]
+                let file_hash = blake3::hash(&content).to_hex().to_string();
+                return Json(ApiFileRange {
+                    content: text,
+                    start,
+                    end,
+                    file_hash,
+                })
+                .into_response();
+            }
+        }
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Invalid byte range or non-UTF8 content".to_string(),
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "File not found".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// Request body for updating a file range
+// r[impl dashboard.editing.api.update-range]
+// r[impl dashboard.editing.api.hash-conflict]
+#[derive(Debug, Clone, Facet)]
+struct ApiUpdateFileRange {
+    path: String,
+    start: usize,
+    end: usize,
+    content: String,
+    file_hash: String,
+}
+
+/// Request body for previewing markdown
+#[derive(Debug, Clone, Facet)]
+struct ApiPreviewMarkdown {
+    content: String,
+}
+
+/// Response for markdown preview
+#[derive(Debug, Clone, Facet)]
+struct ApiPreviewResponse {
+    html: String,
+}
+
+/// PATCH /api/file-range
+/// Update a byte range in a file
+// r[impl dashboard.editing.api.update-range]
+// r[impl dashboard.editing.api.range-validation]
+// r[impl dashboard.editing.save.patch-file]
+async fn api_update_file_range(
+    State(state): State<AppState>,
+    Json(req): Json<ApiUpdateFileRange>,
+) -> impl IntoResponse {
+    let file_path = urlencoding::decode(&req.path).unwrap_or_default();
+    let full_path = state.project_root.join(file_path.as_ref());
+
+    if let Ok(original_content) = std::fs::read(&full_path) {
+        // r[impl dashboard.editing.api.hash-conflict]
+        // Check if file hash matches
+        let current_hash = blake3::hash(&original_content).to_hex().to_string();
+        if current_hash != req.file_hash {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "File has changed since it was loaded. Please reload and try again."
+                        .to_string(),
+                }),
+            )
+                .into_response();
+        }
+
+        if req.end > req.start && req.end <= original_content.len() {
+            // Build new content: before + new content + after
+            let mut new_content = Vec::new();
+            new_content.extend_from_slice(&original_content[..req.start]);
+            new_content.extend_from_slice(req.content.as_bytes());
+            new_content.extend_from_slice(&original_content[req.end..]);
+
+            // Write back to file
+            if std::fs::write(&full_path, &new_content).is_ok() {
+                // r[impl dashboard.editing.api.update-range-response]
+                let new_end = req.start + req.content.len();
+                let new_hash = blake3::hash(&new_content).to_hex().to_string();
+                return Json(ApiFileRange {
+                    content: req.content,
+                    start: req.start,
+                    end: new_end,
+                    file_hash: new_hash,
+                })
+                .into_response();
+            } else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "Failed to write file".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Invalid byte range".to_string(),
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "File not found".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/preview-markdown
+/// Render markdown to HTML for live preview
+async fn api_preview_markdown(Json(req): Json<ApiPreviewMarkdown>) -> impl IntoResponse {
+    // Use marq to render the markdown (same as dashboard)
+    let options = marq::RenderOptions::default();
+    match marq::render(&req.content, &options).await {
+        Ok(result) => Json(ApiPreviewResponse { html: result.html }).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: format!("Failed to render markdown: {}", e),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -1105,23 +1569,30 @@ async fn api_spec(
     State(state): State<AppState>,
     Query(params): Query<Vec<(String, String)>>,
 ) -> impl IntoResponse {
-    let name = params
-        .iter()
-        .find(|(k, _)| k == "name")
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
-
-    let spec_name = urlencoding::decode(&name).unwrap_or_default();
     let data = state.data.borrow().clone();
 
-    if let Some(spec_data) = data.specs_content.get(spec_name.as_ref()) {
-        json_response(spec_data.to_json())
+    // Get impl key (spec_name, impl_name)
+    let Some(impl_key) = get_impl_key(&params, &data.config) else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .unwrap()
+            .into_response();
+    };
+
+    if let Some(spec_data) = data.specs_content_by_impl.get(&impl_key) {
+        Json(spec_data.clone()).into_response()
     } else {
         Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"Spec not found"}"#))
+            .body(Body::from(format!(
+                r#"{{"error":"Spec not found: {} {}"}}"#,
+                impl_key.0, impl_key.1
+            )))
             .unwrap()
+            .into_response()
     }
 }
 
@@ -1146,15 +1617,13 @@ async fn api_search(
 
     let data = state.data.borrow().clone();
     let results = data.search_index.search(&query, limit);
-    let results_json: Vec<String> = results.iter().map(|r| r.to_json()).collect();
-    let json = format!(
-        r#"{{"query":{},"results":[{}],"available":{}}}"#,
-        json_string(&query),
-        results_json.join(","),
-        data.search_index.is_available()
-    );
+    let response = ApiSearchResponse {
+        query: query.into_owned(),
+        results,
+        available: data.search_index.is_available(),
+    };
 
-    json_response(json)
+    Json(response)
 }
 
 async fn serve_js() -> impl IntoResponse {
@@ -1192,14 +1661,6 @@ async fn serve_html(State(state): State<AppState>) -> impl IntoResponse {
     Html(HTML_SHELL).into_response()
 }
 
-fn json_response(body: String) -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap()
-}
-
 // ============================================================================
 // Vite Proxy
 // ============================================================================
@@ -1213,11 +1674,13 @@ fn format_headers(headers: &axum::http::HeaderMap) -> String {
         .join("\n")
 }
 
-/// Check if request has a WebSocket upgrade (like cove/home's has_ws())
+/// Check if request has a WebSocket upgrade
 fn has_ws(req: &Request<Body>) -> bool {
-    req.extensions()
-        .get::<hyper::upgrade::OnUpgrade>()
-        .is_some()
+    // Check for Upgrade header with "websocket" value
+    req.headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
 /// Proxy requests to Vite dev server (handles both HTTP and WebSocket)
@@ -1260,6 +1723,12 @@ async fn vite_proxy(State(state): State<AppState>, req: Request<Body>) -> Respon
         // Split into parts so we can extract WebSocketUpgrade
         let (mut parts, _body) = req.into_parts();
 
+        // Log all request headers for websocket upgrade
+        info!(
+            headers = %format_headers(&parts.headers),
+            "=> websocket upgrade request headers"
+        );
+
         // Manually extract WebSocketUpgrade from request parts (like cove/home)
         let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
             Ok(ws) => ws,
@@ -1276,6 +1745,7 @@ async fn vite_proxy(State(state): State<AppState>, req: Request<Body>) -> Respon
         info!(target = %target_uri, "-> upgrading websocket to vite");
 
         return ws
+            .protocols(["vite-hmr"])
             .on_upgrade(move |socket| async move {
                 info!(path = %path, "websocket connection established, starting proxy");
                 if let Err(e) = handle_vite_ws(socket, vite_port, &path, &query).await {
@@ -1360,16 +1830,63 @@ async fn handle_vite_ws(
     path: &str,
     query: &str,
 ) -> Result<()> {
-    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::connect_async_with_config;
+    use tokio_tungstenite::tungstenite::http::Request;
 
     let vite_url = format!("ws://127.0.0.1:{}{}{}", vite_port, path, query);
 
-    let (vite_ws, _) = connect_async(&vite_url)
-        .await
-        .wrap_err("Failed to connect to Vite WebSocket")?;
+    info!(vite_url = %vite_url, "-> connecting to vite websocket");
+
+    // Build request with vite-hmr subprotocol
+    let request = Request::builder()
+        .uri(&vite_url)
+        .header("Sec-WebSocket-Protocol", "vite-hmr")
+        .header("Host", format!("127.0.0.1:{}", vite_port))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(())
+        .unwrap();
+
+    let connect_timeout = Duration::from_secs(5);
+    let connect_result = tokio::time::timeout(
+        connect_timeout,
+        connect_async_with_config(request, None, false),
+    )
+    .await;
+
+    let (vite_ws, response) = match connect_result {
+        Ok(Ok((ws, resp))) => {
+            info!(vite_url = %vite_url, "-> successfully connected to vite websocket");
+            (ws, resp)
+        }
+        Ok(Err(e)) => {
+            info!(vite_url = %vite_url, error = %e, "!! failed to connect to vite websocket");
+            return Err(e.into());
+        }
+        Err(_) => {
+            info!(vite_url = %vite_url, timeout_secs = ?connect_timeout.as_secs(), "!! timeout connecting to vite websocket");
+            return Err(eyre::eyre!(
+                "Timeout connecting to Vite WebSocket after {:?}",
+                connect_timeout
+            ));
+        }
+    };
+
+    info!(
+        status = %response.status(),
+        "<- vite websocket connection established"
+    );
+    debug!(
+        headers = %format_headers(response.headers()),
+        "<- vite websocket response headers"
+    );
 
     let (mut client_tx, mut client_rx) = client_socket.split();
     let (mut vite_tx, mut vite_rx) = vite_ws.split();
+
+    info!("websocket proxy: starting bidirectional relay");
 
     // Bidirectional proxy
     let client_to_vite = async {
@@ -1377,6 +1894,11 @@ async fn handle_vite_ws(
             match msg {
                 Ok(ws::Message::Text(text)) => {
                     let text_str: String = text.to_string();
+                    info!(
+                        size = text_str.len(),
+                        preview = %text_str.chars().take(100).collect::<String>(),
+                        "=> forwarding text message to vite"
+                    );
                     if vite_tx
                         .send(tokio_tungstenite::tungstenite::Message::Text(
                             text_str.into(),
@@ -1384,11 +1906,16 @@ async fn handle_vite_ws(
                         .await
                         .is_err()
                     {
+                        info!("!! vite send failed (client_to_vite), breaking");
                         break;
                     }
                 }
                 Ok(ws::Message::Binary(data)) => {
                     let data_vec: Vec<u8> = data.to_vec();
+                    info!(
+                        size = data_vec.len(),
+                        "=> forwarding binary message to vite"
+                    );
                     if vite_tx
                         .send(tokio_tungstenite::tungstenite::Message::Binary(
                             data_vec.into(),
@@ -1396,14 +1923,24 @@ async fn handle_vite_ws(
                         .await
                         .is_err()
                     {
+                        info!("!! vite send failed (client_to_vite), breaking");
                         break;
                     }
                 }
-                Ok(ws::Message::Close(_)) => break,
-                Err(_) => break,
-                _ => {}
+                Ok(ws::Message::Close(_)) => {
+                    info!("=> client closed connection");
+                    break;
+                }
+                Err(e) => {
+                    info!(error = %e, "!! client receive error, breaking");
+                    break;
+                }
+                _ => {
+                    debug!("=> ignoring other message type from client");
+                }
             }
         }
+        info!("client_to_vite relay ended");
     };
 
     let vite_to_client = async {
@@ -1411,35 +1948,61 @@ async fn handle_vite_ws(
             match msg {
                 Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                     let text_str: String = text.to_string();
+                    info!(
+                        size = text_str.len(),
+                        preview = %text_str.chars().take(100).collect::<String>(),
+                        "<= forwarding text message to client"
+                    );
                     if client_tx
                         .send(ws::Message::Text(text_str.into()))
                         .await
                         .is_err()
                     {
+                        info!("!! client send failed (vite_to_client), breaking");
                         break;
                     }
                 }
                 Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) => {
                     let data_vec: Vec<u8> = data.to_vec();
+                    info!(
+                        size = data_vec.len(),
+                        "<= forwarding binary message to client"
+                    );
                     if client_tx
                         .send(ws::Message::Binary(data_vec.into()))
                         .await
                         .is_err()
                     {
+                        info!("!! client send failed (vite_to_client), breaking");
                         break;
                     }
                 }
-                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => break,
-                Err(_) => break,
-                _ => {}
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
+                    info!("<= vite closed connection");
+                    break;
+                }
+                Err(e) => {
+                    info!(error = %e, "!! vite receive error, breaking");
+                    break;
+                }
+                _ => {
+                    debug!("<= ignoring other message type from vite");
+                }
             }
         }
+        info!("vite_to_client relay ended");
     };
 
     tokio::select! {
-        _ = client_to_vite => {}
-        _ = vite_to_client => {}
+        _ = client_to_vite => {
+            info!("websocket proxy: client_to_vite completed first");
+        }
+        _ = vite_to_client => {
+            info!("websocket proxy: vite_to_client completed first");
+        }
     }
+
+    info!("websocket proxy: connection closed, exiting");
 
     Ok(())
 }
@@ -1492,13 +2055,14 @@ async fn run_server(
             .wrap_err("Failed to canonicalize project root")?,
         None => crate::find_project_root()?,
     };
+    // r[impl config.path.default]
     let config_path = config_path.unwrap_or_else(|| project_root.join(".config/tracey/config.kdl"));
     let config = crate::load_config(&config_path)?;
 
     let version = Arc::new(AtomicU64::new(1));
 
     // Initial build
-    let initial_data = build_dashboard_data(&project_root, &config_path, &config, 1).await?;
+    let initial_data = build_dashboard_data(&project_root, &config, 1, false).await?;
 
     // Channel for state updates
     let (tx, rx) = watch::channel(Arc::new(initial_data));
@@ -1606,23 +2170,40 @@ async fn run_server(
                 }
             };
 
-            // Get current hash to compare
-            let current_hash = rebuild_rx.borrow().content_hash;
+            // Get current data for hash comparison and delta computation
+            let old_data = rebuild_rx.borrow().clone();
 
             // Build with placeholder version (we'll set real version if hash changed)
-            match build_dashboard_data(&rebuild_project_root, &rebuild_config_path, &config, 0)
-                .await
-            {
+            match build_dashboard_data(&rebuild_project_root, &config, 0, false).await {
                 Ok(mut data) => {
                     // Only bump version if content actually changed
-                    if data.content_hash != current_hash {
+                    if data.content_hash != old_data.content_hash {
                         let new_version = rebuild_version.fetch_add(1, Ordering::SeqCst) + 1;
                         data.version = new_version;
-                        eprintln!(
-                            "{} Rebuilt dashboard (v{})",
-                            "->".blue().bold(),
-                            new_version
-                        );
+
+                        // Compute delta between old and new data
+                        let delta = crate::server::Delta::compute(&old_data, &data);
+
+                        // Print rebuild message with delta summary
+                        let delta_summary = delta.summary();
+                        if delta.is_empty() {
+                            eprintln!(
+                                "{} Rebuilt dashboard (v{})",
+                                "->".blue().bold(),
+                                new_version
+                            );
+                        } else {
+                            eprintln!(
+                                "{} Rebuilt dashboard (v{}) - {}",
+                                "->".blue().bold(),
+                                new_version,
+                                delta_summary.green()
+                            );
+                        }
+
+                        // Store delta in the new data
+                        data.delta = delta;
+
                         let _ = rebuild_tx.send(Arc::new(data));
                     }
                     // If hash is same, silently ignore the rebuild
@@ -1643,12 +2224,23 @@ async fn run_server(
     };
 
     // Build router
+    // r[impl dashboard.api.config]
+    // r[impl dashboard.api.forward]
+    // r[impl dashboard.api.reverse]
+    // r[impl dashboard.api.version]
+    // r[impl dashboard.api.file]
+    // r[impl dashboard.api.spec]
     let mut app = Router::new()
         .route("/api/config", get(api_config))
         .route("/api/forward", get(api_forward))
         .route("/api/reverse", get(api_reverse))
         .route("/api/version", get(api_version))
+        .route("/api/delta", get(api_delta))
         .route("/api/file", get(api_file))
+        .route("/api/check-git", get(api_check_git))
+        .route("/api/file-range", get(api_file_range))
+        .route("/api/file-range", patch(api_update_file_range))
+        .route("/api/preview-markdown", post(api_preview_markdown))
         .route("/api/spec", get(api_spec))
         .route("/api/search", get(api_search));
 

@@ -1,8 +1,9 @@
 //! Configuration schema for tracey
 //!
-//! Config lives at `.config/tracey/config.kdl` relative to the project root.
+//! r[impl config.format.kdl]
+//! r[impl config.schema]
 //!
-//! [impl config.format.kdl]
+//! Config lives at `.config/tracey/config.kdl` relative to the project root.
 
 use facet::Facet;
 use facet_kdl as kdl;
@@ -19,33 +20,43 @@ pub struct Config {
 #[derive(Debug, Clone, Facet)]
 pub struct SpecConfig {
     /// Name of the spec (for display purposes)
-    ///
-    /// [impl config.spec.name]
+    /// r[impl config.spec.name]
     #[facet(kdl::child)]
     pub name: Name,
 
-    /// URL to the spec's _rules.json manifest
-    /// e.g., `https://rapace.dev/_rules.json`
-    #[facet(kdl::child, default)]
-    pub rules_url: Option<RulesUrl>,
+    /// Prefix used to identify this spec in annotations (e.g., "r" for r[req.id])
+    /// r[impl config.spec.prefix]
+    #[facet(kdl::child)]
+    pub prefix: Prefix,
 
-    /// Path to a local _rules.json file (relative to the config file)
-    /// e.g., "specs/my-spec/_rules.json"
-    #[facet(kdl::child, default)]
-    pub rules_file: Option<RulesFile>,
-
-    /// Glob pattern for markdown spec files to extract rules from
+    /// Glob patterns for markdown spec files containing requirement definitions
     /// e.g., "docs/spec/**/*.md"
-    /// Rules will be extracted from r[rule.id] syntax in the markdown
-    #[facet(kdl::child, default)]
-    pub rules_glob: Option<RulesGlob>,
+    /// r[impl config.spec.include]
+    #[facet(kdl::children, default)]
+    pub include: Vec<Include>,
 
-    /// Glob patterns for Rust files to scan
-    /// Defaults to ["**/*.rs"] if not specified
+    /// Implementations of this spec (by language)
+    /// Each impl block specifies which source files to scan
+    #[facet(kdl::children, default)]
+    pub impls: Vec<Impl>,
+}
+
+/// Configuration for a single implementation of a spec
+/// Note: struct name `Impl` maps to KDL node name `impl`
+#[derive(Debug, Clone, Facet)]
+pub struct Impl {
+    /// Name of this implementation (e.g., "main", "core", "frontend")
+    /// r[impl config.impl.name]
+    #[facet(kdl::child)]
+    pub name: ImplName,
+
+    /// Glob patterns for source files to scan
+    /// r[impl config.impl.include]
     #[facet(kdl::children, default)]
     pub include: Vec<Include>,
 
     /// Glob patterns to exclude
+    /// r[impl config.impl.exclude]
     #[facet(kdl::children, default)]
     pub exclude: Vec<Exclude>,
 }
@@ -57,21 +68,15 @@ pub struct Name {
 }
 
 #[derive(Debug, Clone, Facet)]
-pub struct RulesUrl {
+pub struct Prefix {
     #[facet(kdl::argument)]
     pub value: String,
 }
 
 #[derive(Debug, Clone, Facet)]
-pub struct RulesFile {
+pub struct ImplName {
     #[facet(kdl::argument)]
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Facet)]
-pub struct RulesGlob {
-    #[facet(kdl::argument)]
-    pub pattern: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Facet)]

@@ -1,4 +1,13 @@
 spec {
     name "tracey"
-    rules_glob "docs/spec/**/*.md"
+    prefix "r"
+    include "docs/spec/**/*.md"
+
+    impl {
+        name "main"
+        include "crates/**/*.rs"
+        include "crates/tracey/dashboard/src/**/*.ts"
+        include "crates/tracey/dashboard/src/**/*.tsx"
+        exclude "target/**"
+    }
 }
