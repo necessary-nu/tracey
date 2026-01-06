@@ -93,3 +93,4 @@ default = ["search"]
 search = ["dep:tantivy"]
 
 [dev-dependencies]
+tempfile = "3.24.0"

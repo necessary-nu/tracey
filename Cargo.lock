@@ -2355,7 +2355,7 @@ checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
 [[package]]
 name = "marq"
 version = "0.1.0"
-source = "git+https://github.com/bearcove/marq#9eff49b6e0fc7a461bd28d70d54b8b72b7a54e03"
+source = "git+https://github.com/bearcove/marq#63098333bbb446c650ada5aff70678ce7c918382"
 dependencies = [
  "aasvg",
  "arborium",
@@ -4128,6 +4128,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tantivy",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tower-http",

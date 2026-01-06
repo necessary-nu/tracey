@@ -400,24 +400,42 @@ impl<'a> QueryEngine<'a> {
 
     /// Get a specific rule by ID
     pub fn rule(&self, rule_id: &str) -> Option<RuleInfo> {
-        // Search across all impls for the rule
+        // Collect coverage from all impls for this rule
+        let mut coverage = Vec::new();
+        let mut result: Option<RuleInfo> = None;
+
         for (key, forward) in &self.data.forward_by_impl {
             if let Some(rule) = forward.rules.iter().find(|r| r.id == rule_id) {
-                return Some(RuleInfo {
-                    id: rule.id.clone(),
-                    html: rule.html.clone(),
-                    source_file: rule.source_file.clone(),
-                    source_line: rule.source_line,
-                    status: rule.status.clone(),
-                    level: rule.level.clone(),
-                    impl_refs: rule.impl_refs.clone(),
-                    verify_refs: rule.verify_refs.clone(),
+                // Capture rule metadata from first match
+                if result.is_none() {
+                    result = Some(RuleInfo {
+                        id: rule_id.to_string(),
+                        text: rule.text.clone(),
+                        html: rule.html.clone(),
+                        source_file: rule.source_file.clone(),
+                        source_line: rule.source_line,
+                        status: rule.status.clone(),
+                        level: rule.level.clone(),
+                        coverage: Vec::new(), // Will be set at the end
+                    });
+                }
+
+                // Add coverage for this impl
+                coverage.push(ImplCoverage {
                     spec: key.0.clone(),
                     impl_name: key.1.clone(),
+                    impl_refs: rule.impl_refs.clone(),
+                    verify_refs: rule.verify_refs.clone(),
                 });
             }
         }
-        None
+
+        // Set the coverage on the result
+        if let Some(ref mut info) = result {
+            info.coverage = coverage;
+        }
+
+        result
     }
 }
 
@@ -494,18 +512,43 @@ impl FileTreeNode {
     }
 }
 
+/// Coverage information for a rule in a specific implementation
+#[derive(Debug, Clone)]
+pub struct ImplCoverage {
+    pub spec: String,
+    pub impl_name: String,
+    pub impl_refs: Vec<ApiCodeRef>,
+    pub verify_refs: Vec<ApiCodeRef>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuleInfo {
     pub id: String,
+    pub text: String,
     pub html: String,
     pub source_file: Option<String>,
     pub source_line: Option<usize>,
     pub status: Option<String>,
     pub level: Option<String>,
-    pub impl_refs: Vec<ApiCodeRef>,
-    pub verify_refs: Vec<ApiCodeRef>,
-    pub spec: String,
-    pub impl_name: String,
+    /// Coverage across all implementations
+    pub coverage: Vec<ImplCoverage>,
+}
+
+impl RuleInfo {
+    /// Check if this rule has any implementation references across all impls
+    pub fn has_any_impl(&self) -> bool {
+        self.coverage.iter().any(|c| !c.impl_refs.is_empty())
+    }
+
+    /// Check if this rule has any verification references across all impls
+    pub fn has_any_verify(&self) -> bool {
+        self.coverage.iter().any(|c| !c.verify_refs.is_empty())
+    }
+
+    /// Get all impl refs across all implementations
+    pub fn all_impl_refs(&self) -> Vec<&ApiCodeRef> {
+        self.coverage.iter().flat_map(|c| &c.impl_refs).collect()
+    }
 }
 
 // ============================================================================
@@ -875,27 +918,49 @@ impl RuleInfo {
             out.push_str(&format!("Level: {}\n", level));
         }
 
-        out.push_str("\n## Implementations\n");
-        if self.impl_refs.is_empty() {
-            out.push_str("  (none)\n");
-        } else {
-            for r in &self.impl_refs {
-                out.push_str(&format!("  {}:{}\n", r.file, r.line));
-            }
-        }
+        // Show coverage per implementation
+        out.push_str("\n## Coverage by Implementation\n\n");
 
-        out.push_str("\n## Verifications\n");
-        if self.verify_refs.is_empty() {
-            out.push_str("  (none)\n");
+        if self.coverage.is_empty() {
+            out.push_str("  (no implementations configured)\n");
         } else {
-            for r in &self.verify_refs {
-                out.push_str(&format!("  {}:{}\n", r.file, r.line));
+            for cov in &self.coverage {
+                let impl_label = format!("{}/{}", cov.spec, cov.impl_name);
+                let has_impl = !cov.impl_refs.is_empty();
+                let has_verify = !cov.verify_refs.is_empty();
+
+                let status_icon = match (has_impl, has_verify) {
+                    (true, true) => "✓✓",
+                    (true, false) => "✓ ",
+                    (false, true) => " ✓",
+                    (false, false) => "  ",
+                };
+
+                out.push_str(&format!("### {} [{}]\n", impl_label, status_icon));
+
+                if cov.impl_refs.is_empty() && cov.verify_refs.is_empty() {
+                    out.push_str("  (not covered)\n");
+                } else {
+                    if !cov.impl_refs.is_empty() {
+                        out.push_str("  **Implementations:**\n");
+                        for r in &cov.impl_refs {
+                            out.push_str(&format!("    - {}:{}\n", r.file, r.line));
+                        }
+                    }
+                    if !cov.verify_refs.is_empty() {
+                        out.push_str("  **Verifications:**\n");
+                        for r in &cov.verify_refs {
+                            out.push_str(&format!("    - {}:{}\n", r.file, r.line));
+                        }
+                    }
+                }
+                out.push('\n');
             }
         }
 
         // Strip HTML tags from rule text for display
         let text = strip_html(&self.html);
-        out.push_str(&format!("\n## Rule Text\n{}\n", text));
+        out.push_str(&format!("## Rule Text\n{}\n", text));
 
         out
     }
@@ -923,4 +988,302 @@ fn strip_html(html: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&nbsp;", " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Create a test fixture with spec, impl files, and config
+    async fn create_test_fixture() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Create directory structure
+        fs::create_dir_all(root.join(".config/tracey")).unwrap();
+        fs::create_dir_all(root.join("docs/spec")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+
+        // Write spec file with some rules
+        let spec_content = r#"# Test Spec
+
+r[foo.bar]
+This is the foo.bar rule.
+
+r[foo.baz]
+This is the foo.baz rule.
+
+r[uncovered.rule]
+This rule has no implementation.
+"#;
+        fs::write(root.join("docs/spec/spec.md"), spec_content).unwrap();
+
+        // Write impl file with annotations
+        let impl_content = r#"// r[impl foo.bar]
+fn do_foo_bar() {}
+
+// r[impl foo.baz]
+fn do_foo_baz() {}
+"#;
+        fs::write(root.join("src/lib.rs"), impl_content).unwrap();
+
+        // Write config
+        let config_content = r#"spec {
+    name "test-spec"
+    prefix "r"
+    include "docs/spec/**/*.md"
+
+    impl {
+        name "main"
+        include "src/**/*.rs"
+    }
+}
+"#;
+        fs::write(root.join(".config/tracey/config.kdl"), config_content).unwrap();
+
+        (tmp, root)
+    }
+
+    #[tokio::test]
+    async fn test_status_and_rule_consistency() {
+        let (_tmp, root) = create_test_fixture().await;
+        let config_path = root.join(".config/tracey/config.kdl");
+        let config = crate::load_config(&config_path).unwrap();
+
+        // Build dashboard data
+        let data = crate::serve::build_dashboard_data(&root, &config, 1, true)
+            .await
+            .unwrap();
+
+        let engine = QueryEngine::new(&data);
+
+        // Get status
+        let status = engine.status();
+        assert_eq!(status.len(), 1, "Should have one spec/impl pair");
+
+        let (spec, impl_name, stats) = &status[0];
+        assert_eq!(spec, "test-spec");
+        assert_eq!(impl_name, "main");
+        assert_eq!(stats.total_rules, 3, "Should have 3 total rules");
+        assert_eq!(stats.impl_covered, 2, "Should have 2 covered rules");
+
+        // Now look up each covered rule and verify impl_refs are populated
+        let foo_bar = engine.rule("foo.bar").expect("foo.bar should exist");
+        assert!(
+            foo_bar.has_any_impl(),
+            "foo.bar should have impl_refs, got: {:?}",
+            foo_bar.coverage
+        );
+
+        let foo_baz = engine.rule("foo.baz").expect("foo.baz should exist");
+        assert!(
+            foo_baz.has_any_impl(),
+            "foo.baz should have impl_refs, got: {:?}",
+            foo_baz.coverage
+        );
+
+        // Uncovered rule should exist but have no impl_refs
+        let uncovered = engine
+            .rule("uncovered.rule")
+            .expect("uncovered.rule should exist");
+        assert!(
+            !uncovered.has_any_impl(),
+            "uncovered.rule should have no impl_refs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rule_lookup_finds_covered_rules() {
+        let (_tmp, root) = create_test_fixture().await;
+        let config_path = root.join(".config/tracey/config.kdl");
+        let config = crate::load_config(&config_path).unwrap();
+
+        let data = crate::serve::build_dashboard_data(&root, &config, 1, true)
+            .await
+            .unwrap();
+
+        let engine = QueryEngine::new(&data);
+
+        // The bug report: status shows coverage, but rule lookup shows none
+        // Let's verify they're consistent
+        let status = engine.status();
+        let (_, _, stats) = &status[0];
+
+        // Count covered rules via status
+        let status_covered = stats.impl_covered;
+
+        // Count covered rules via individual lookups
+        let mut lookup_covered = 0;
+        for rule_id in ["foo.bar", "foo.baz", "uncovered.rule"] {
+            if let Some(rule) = engine.rule(rule_id)
+                && rule.has_any_impl()
+            {
+                lookup_covered += 1;
+            }
+        }
+
+        assert_eq!(
+            status_covered, lookup_covered,
+            "Status covered count ({}) should match lookup covered count ({})",
+            status_covered, lookup_covered
+        );
+    }
+
+    /// Test with multiple impls to check if rule lookup returns the right one
+    #[tokio::test]
+    async fn test_multiple_impls() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        // Create directory structure
+        fs::create_dir_all(root.join(".config/tracey")).unwrap();
+        fs::create_dir_all(root.join("docs/spec")).unwrap();
+        fs::create_dir_all(root.join("impl-a/src")).unwrap();
+        fs::create_dir_all(root.join("impl-b/src")).unwrap();
+
+        // Write spec file
+        let spec_content = r#"# Test Spec
+
+r[shared.rule]
+This rule is implemented in both impls.
+
+r[only.in.a]
+This rule is only in impl-a.
+
+r[only.in.b]
+This rule is only in impl-b.
+"#;
+        fs::write(root.join("docs/spec/spec.md"), spec_content).unwrap();
+
+        // Write impl-a with annotations
+        let impl_a_content = r#"// r[impl shared.rule]
+fn shared_a() {}
+
+// r[impl only.in.a]
+fn only_a() {}
+"#;
+        fs::write(root.join("impl-a/src/lib.rs"), impl_a_content).unwrap();
+
+        // Write impl-b with annotations
+        let impl_b_content = r#"// r[impl shared.rule]
+fn shared_b() {}
+
+// r[impl only.in.b]
+fn only_b() {}
+"#;
+        fs::write(root.join("impl-b/src/lib.rs"), impl_b_content).unwrap();
+
+        // Write config with two impls
+        let config_content = r#"spec {
+    name "test-spec"
+    prefix "r"
+    include "docs/spec/**/*.md"
+
+    impl {
+        name "impl-a"
+        include "impl-a/**/*.rs"
+    }
+
+    impl {
+        name "impl-b"
+        include "impl-b/**/*.rs"
+    }
+}
+"#;
+        fs::write(root.join(".config/tracey/config.kdl"), config_content).unwrap();
+
+        let config_path = root.join(".config/tracey/config.kdl");
+        let config = crate::load_config(&config_path).unwrap();
+
+        let data = crate::serve::build_dashboard_data(&root, &config, 1, true)
+            .await
+            .unwrap();
+
+        let engine = QueryEngine::new(&data);
+
+        // Get status for each impl
+        let status = engine.status();
+        assert_eq!(status.len(), 2, "Should have two spec/impl pairs");
+
+        // Check impl-a coverage
+        let impl_a_stats = status.iter().find(|(_, name, _)| name == "impl-a").unwrap();
+        assert_eq!(
+            impl_a_stats.2.impl_covered, 2,
+            "impl-a should have 2 covered rules"
+        );
+
+        // Check impl-b coverage
+        let impl_b_stats = status.iter().find(|(_, name, _)| name == "impl-b").unwrap();
+        assert_eq!(
+            impl_b_stats.2.impl_covered, 2,
+            "impl-b should have 2 covered rules"
+        );
+
+        // Now check individual rule lookups
+        // rule() now returns coverage for ALL impls, so we can see where it's implemented
+        let shared = engine
+            .rule("shared.rule")
+            .expect("shared.rule should exist");
+        // shared.rule is implemented in both impls
+        assert!(shared.has_any_impl(), "shared.rule should have impl_refs");
+        assert_eq!(
+            shared.coverage.len(),
+            2,
+            "shared.rule should have coverage for 2 impls"
+        );
+
+        let only_a = engine.rule("only.in.a").expect("only.in.a should exist");
+        // This rule is only in impl-a, but coverage shows both impls
+        assert!(only_a.has_any_impl(), "only.in.a should have impl_refs");
+        // Verify it's covered in impl-a
+        let impl_a_cov = only_a
+            .coverage
+            .iter()
+            .find(|c| c.impl_name == "impl-a")
+            .unwrap();
+        assert!(
+            !impl_a_cov.impl_refs.is_empty(),
+            "only.in.a should be covered in impl-a"
+        );
+        // And not covered in impl-b
+        let impl_b_cov = only_a
+            .coverage
+            .iter()
+            .find(|c| c.impl_name == "impl-b")
+            .unwrap();
+        assert!(
+            impl_b_cov.impl_refs.is_empty(),
+            "only.in.a should not be covered in impl-b"
+        );
+
+        let only_b = engine.rule("only.in.b").expect("only.in.b should exist");
+        // This rule is only in impl-b - with the fix, has_any_impl() should be true
+        assert!(
+            only_b.has_any_impl(),
+            "only.in.b should have impl_refs (the bug we fixed!)"
+        );
+        // Verify it's NOT covered in impl-a
+        let impl_a_cov = only_b
+            .coverage
+            .iter()
+            .find(|c| c.impl_name == "impl-a")
+            .unwrap();
+        assert!(
+            impl_a_cov.impl_refs.is_empty(),
+            "only.in.b should not be covered in impl-a"
+        );
+        // And IS covered in impl-b
+        let impl_b_cov = only_b
+            .coverage
+            .iter()
+            .find(|c| c.impl_name == "impl-b")
+            .unwrap();
+        assert!(
+            !impl_b_cov.impl_refs.is_empty(),
+            "only.in.b should be covered in impl-b"
+        );
+    }
 }

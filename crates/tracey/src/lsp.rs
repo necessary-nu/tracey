@@ -164,8 +164,8 @@ impl Backend {
         // Collect from all specs
         for (impl_key, spec_data) in &data.forward_by_impl {
             for rule in &spec_data.rules {
-                // (id, description/html, spec_name)
-                reqs.push((rule.id.clone(), rule.html.clone(), impl_key.0.clone()));
+                // (id, text, spec_name)
+                reqs.push((rule.id.clone(), rule.text.clone(), impl_key.0.clone()));
             }
         }
 
@@ -311,7 +311,7 @@ impl Backend {
                 if rule.id == req_id {
                     return Some(RequirementInfo {
                         id: rule.id.clone(),
-                        html: rule.html.clone(),
+                        text: rule.text.clone(),
                         source_file: rule.source_file.clone().unwrap_or_default(),
                         source_line: rule.source_line,
                         source_column: rule.source_column,
@@ -442,7 +442,7 @@ impl Backend {
 
 struct RequirementInfo {
     id: String,
-    html: String,
+    text: String,
     source_file: String,
     source_line: Option<usize>,
     source_column: Option<usize>,
@@ -623,14 +623,7 @@ impl LanguageServer for Backend {
         let items: Vec<CompletionItem> = requirements
             .iter()
             .filter(|(id, _, _)| req_prefix.is_empty() || id.contains(req_prefix))
-            .map(|(id, html, spec)| {
-                // Strip HTML tags for plain text description
-                let plain_text = html
-                    .replace("<p>", "")
-                    .replace("</p>", "")
-                    .replace("<code>", "`")
-                    .replace("</code>", "`");
-
+            .map(|(id, text, spec)| {
                 // r[impl lsp.completions.req-id-preview]
                 CompletionItem {
                     label: id.clone(),
@@ -638,7 +631,7 @@ impl LanguageServer for Backend {
                     detail: Some(format!("[{}]", spec)),
                     documentation: Some(Documentation::MarkupContent(MarkupContent {
                         kind: MarkupKind::Markdown,
-                        value: format!("**{}**\n\n{}", id, plain_text),
+                        value: format!("**{}**\n\n{}", id, text),
                     })),
                     ..Default::default()
                 }
@@ -662,20 +655,12 @@ impl LanguageServer for Backend {
         };
 
         if let Some(info) = self.find_requirement(&req.id) {
-            // Strip HTML for markdown display
-            let plain_text = info
-                .html
-                .replace("<p>", "")
-                .replace("</p>", "\n\n")
-                .replace("<code>", "`")
-                .replace("</code>", "`");
-
             // r[impl lsp.hover.req-reference-format]
             // Coverage info (impl/test counts) is shown via inlay hints, so hover just shows the requirement text
             let content = format!(
                 "### {}\n\n{}\n\n*Defined in: {}*",
                 info.id,
-                plain_text.trim(),
+                info.text.trim(),
                 info.source_file
             );
 

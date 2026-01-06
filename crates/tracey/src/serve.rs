@@ -586,7 +586,8 @@ pub async fn build_dashboard_data(
                 let mut depends_refs = Vec::new();
 
                 for r in &reqs.references {
-                    if r.req_id == extracted.def.id {
+                    // r[impl ref.prefix.matching]
+                    if r.prefix == spec_config.prefix.value && r.req_id == extracted.def.id {
                         // Canonicalize the reference file path for consistent matching
                         let canonical_ref =
                             r.file.canonicalize().unwrap_or_else(|_| r.file.clone());
@@ -614,6 +615,7 @@ pub async fn build_dashboard_data(
 
                 api_rules.push(ApiRule {
                     id: extracted.def.id.clone(),
+                    text: extracted.def.text.clone(),
                     html: extracted.def.html.clone(),
                     status: extracted
                         .def
