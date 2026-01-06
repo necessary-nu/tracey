@@ -268,6 +268,8 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 // r[impl lsp.highlight.full-range]
                 document_highlight_provider: Some(OneOf::Left(true)),
+                // r[impl lsp.impl.from-ref]
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 // Sync full document content
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
@@ -490,6 +492,59 @@ impl LanguageServer for Backend {
                 end: Position { line, character },
             },
         })))
+    }
+
+    // r[impl lsp.impl.from-ref]
+    // r[impl lsp.impl.multiple]
+    async fn goto_implementation(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> LspResult<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let Some((req_id, _range)) = self.find_req_at_position(uri, position) else {
+            return Ok(None);
+        };
+
+        let Some(info) = self.find_requirement(&req_id) else {
+            return Ok(None);
+        };
+
+        if info.impl_refs.is_empty() {
+            return Ok(None);
+        }
+
+        // Convert impl refs to locations
+        let locations: Vec<Location> = info
+            .impl_refs
+            .iter()
+            .filter_map(|r| {
+                let path = self.project_root.join(&r.file);
+                let uri = Url::from_file_path(&path).ok()?;
+                let line = r.line.saturating_sub(1) as u32;
+                Some(Location {
+                    uri,
+                    range: Range {
+                        start: Position { line, character: 0 },
+                        end: Position { line, character: 0 },
+                    },
+                })
+            })
+            .collect();
+
+        if locations.is_empty() {
+            return Ok(None);
+        }
+
+        // Return single location or array depending on count
+        if locations.len() == 1 {
+            Ok(Some(GotoDefinitionResponse::Scalar(
+                locations.into_iter().next().unwrap(),
+            )))
+        } else {
+            Ok(Some(GotoDefinitionResponse::Array(locations)))
+        }
     }
 
     // r[impl lsp.highlight.full-range]
