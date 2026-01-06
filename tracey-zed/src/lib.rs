@@ -12,13 +12,13 @@ impl zed::Extension for TraceyExtension {
         _language_server_id: &LanguageServerId,
         _worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        // For development, use hardcoded path
+        // For development, use hardcoded path to tracey binary
         // TODO: In production, look for tracey in PATH or download it
-        let binary_path = "/Users/amos/bearcove/tracey/target/release/tracey-lsp-proto";
+        let binary_path = "/Users/amos/bearcove/tracey/target/release/tracey";
 
         Ok(zed::Command {
             command: binary_path.to_string(),
-            args: vec![],
+            args: vec!["lsp".to_string()],
             env: Default::default(),
         })
     }

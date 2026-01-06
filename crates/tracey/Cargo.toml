@@ -85,6 +85,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.148"
 url = { version = "*", features = ["serde"] }
 
+# LSP server
+tower-lsp = "0.20"
+
 [features]
 default = ["search"]
 search = ["dep:tantivy"]

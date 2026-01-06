@@ -735,6 +735,7 @@ function App() {
 
 // Route components that extract params and render views
 // r[impl dashboard.url.spec-view]
+// r[impl dashboard.editing.reload.smooth]
 function SpecViewRoute() {
   const { params, query } = useRoute();
   const { route } = useLocation();

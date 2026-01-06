@@ -581,13 +581,13 @@ pub async fn build_dashboard_data(
 
             // Build forward data for this impl
             let mut api_rules = Vec::new();
-            for (rule_def, source_file) in &extracted_rules {
+            for extracted in &extracted_rules {
                 let mut impl_refs = Vec::new();
                 let mut verify_refs = Vec::new();
                 let mut depends_refs = Vec::new();
 
                 for r in &reqs.references {
-                    if r.req_id == rule_def.id {
+                    if r.req_id == extracted.def.id {
                         // Canonicalize the reference file path for consistent matching
                         let canonical_ref =
                             r.file.canonicalize().unwrap_or_else(|_| r.file.clone());
@@ -614,12 +614,17 @@ pub async fn build_dashboard_data(
                 }
 
                 api_rules.push(ApiRule {
-                    id: rule_def.id.clone(),
-                    html: rule_def.html.clone(),
-                    status: rule_def.metadata.status.map(|s| s.as_str().to_string()),
-                    level: rule_def.metadata.level.map(|l| l.as_str().to_string()),
-                    source_file: Some(source_file.clone()),
-                    source_line: Some(rule_def.line),
+                    id: extracted.def.id.clone(),
+                    html: extracted.def.html.clone(),
+                    status: extracted
+                        .def
+                        .metadata
+                        .status
+                        .map(|s| s.as_str().to_string()),
+                    level: extracted.def.metadata.level.map(|l| l.as_str().to_string()),
+                    source_file: Some(extracted.source_file.clone()),
+                    source_line: Some(extracted.def.line),
+                    source_column: extracted.column,
                     impl_refs,
                     verify_refs,
                     depends_refs,

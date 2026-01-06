@@ -66,6 +66,8 @@ pub struct ApiRule {
     pub source_file: Option<String>,
     #[facet(default)]
     pub source_line: Option<usize>,
+    #[facet(default)]
+    pub source_column: Option<usize>,
     pub impl_refs: Vec<ApiCodeRef>,
     pub verify_refs: Vec<ApiCodeRef>,
     pub depends_refs: Vec<ApiCodeRef>,

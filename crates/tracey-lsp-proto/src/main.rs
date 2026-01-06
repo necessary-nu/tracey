@@ -194,10 +194,10 @@ impl LanguageServer for Backend {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        if let Some(change) = params.content_changes.into_iter().next() {
-            if let Ok(mut docs) = self.documents.write() {
-                docs.insert(uri, change.text);
-            }
+        if let Some(change) = params.content_changes.into_iter().next()
+            && let Ok(mut docs) = self.documents.write()
+        {
+            docs.insert(uri, change.text);
         }
     }
 
@@ -330,34 +330,34 @@ impl LanguageServer for Backend {
             )
             .await;
 
-        if let Some((req_id, _range)) = self.find_req_at_position(uri, position) {
-            if let Some((_, location)) = self.requirements.get(&req_id) {
-                // Parse location like "docs/spec/auth.md:42"
-                let parts: Vec<&str> = location.split(':').collect();
-                if parts.len() == 2 {
-                    let file = parts[0];
-                    let line: u32 = parts[1].parse().unwrap_or(1);
+        if let Some((req_id, _range)) = self.find_req_at_position(uri, position)
+            && let Some((_, location)) = self.requirements.get(&req_id)
+        {
+            // Parse location like "docs/spec/auth.md:42"
+            let parts: Vec<&str> = location.split(':').collect();
+            if parts.len() == 2 {
+                let file = parts[0];
+                let line: u32 = parts[1].parse().unwrap_or(1);
 
-                    // Construct URI relative to workspace
-                    // For prototype, just use file:// with current dir
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    let full_path = cwd.join(file);
+                // Construct URI relative to workspace
+                // For prototype, just use file:// with current dir
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let full_path = cwd.join(file);
 
-                    if let Ok(target_uri) = Url::from_file_path(&full_path) {
-                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: target_uri,
-                            range: Range {
-                                start: Position {
-                                    line: line.saturating_sub(1),
-                                    character: 0,
-                                },
-                                end: Position {
-                                    line: line.saturating_sub(1),
-                                    character: 0,
-                                },
+                if let Ok(target_uri) = Url::from_file_path(&full_path) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position {
+                                line: line.saturating_sub(1),
+                                character: 0,
                             },
-                        })));
-                    }
+                            end: Position {
+                                line: line.saturating_sub(1),
+                                character: 0,
+                            },
+                        },
+                    })));
                 }
             }
         }

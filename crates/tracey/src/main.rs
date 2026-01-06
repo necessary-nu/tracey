@@ -5,6 +5,7 @@
 //! manifest to produce coverage reports.
 
 mod config;
+mod lsp;
 mod mcp;
 mod search;
 mod serve;
@@ -66,6 +67,17 @@ enum Command {
         #[facet(args::named, args::short = 'c', default)]
         config: Option<PathBuf>,
     },
+
+    /// Start the LSP server for editor integration
+    Lsp {
+        /// Project root directory (default: current directory)
+        #[facet(args::positional, default)]
+        root: Option<PathBuf>,
+
+        /// Path to config file (default: .config/tracey/config.kdl)
+        #[facet(args::named, args::short = 'c', default)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -85,6 +97,11 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(mcp::run(root, config))
         }
+        // r[impl cli.lsp]
+        Some(Command::Lsp { root, config }) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(lsp::run(root, config))
+        }
         // r[impl cli.no-args]
         None => {
             print_help();
@@ -103,6 +120,7 @@ fn print_help() {
 {commands}:
     {serve}     Start the interactive web dashboard
     {mcp}       Start the MCP server for AI assistants
+    {lsp}       Start the LSP server for editor integration
 
 {options}:
     -h, --help      Show this help message
@@ -112,21 +130,38 @@ Run 'tracey <COMMAND> --help' for more information on a command."#,
         commands = "Commands".bold(),
         serve = "serve".cyan(),
         mcp = "mcp".cyan(),
+        lsp = "lsp".cyan(),
         options = "Options".bold(),
     );
 }
 
+/// Extracted rule with source location info
+pub(crate) struct ExtractedRule {
+    pub def: ReqDefinition,
+    pub source_file: String,
+    /// 1-indexed column where the rule marker starts
+    pub column: Option<usize>,
+}
+
+/// Compute 1-indexed column from byte offset in content
+fn compute_column(content: &str, byte_offset: usize) -> usize {
+    // Find the start of the line containing this offset
+    let before = &content[..byte_offset.min(content.len())];
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    // Column is the number of characters from line start to offset (1-indexed)
+    before[line_start..].chars().count() + 1
+}
+
 /// Load rules from markdown files matching a glob pattern.
-/// Returns a Vec of (ReqDefinition, source_file) tuples.
 pub(crate) async fn load_rules_from_glob(
     root: &std::path::Path,
     pattern: &str,
     quiet: bool,
-) -> Result<Vec<(ReqDefinition, String)>> {
+) -> Result<Vec<ExtractedRule>> {
     use ignore::WalkBuilder;
     use std::collections::HashSet;
 
-    let mut rules: Vec<(ReqDefinition, String)> = Vec::new();
+    let mut rules: Vec<ExtractedRule> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
 
     // Walk the directory tree
@@ -190,9 +225,14 @@ pub(crate) async fn load_rules_from_glob(
                 seen_ids.insert(req.id.clone());
             }
 
-            // Add requirements with their source file
+            // Add requirements with their source file and computed column
             for req in doc.reqs {
-                rules.push((req, relative_str.clone()));
+                let column = Some(compute_column(&content, req.span.offset));
+                rules.push(ExtractedRule {
+                    def: req,
+                    source_file: relative_str.clone(),
+                    column,
+                });
             }
         }
     }
@@ -205,10 +245,10 @@ pub(crate) async fn load_rules_from_globs(
     root: &std::path::Path,
     patterns: &[&str],
     quiet: bool,
-) -> Result<Vec<(ReqDefinition, String)>> {
+) -> Result<Vec<ExtractedRule>> {
     use std::collections::HashSet;
 
-    let mut all_rules: Vec<(ReqDefinition, String)> = Vec::new();
+    let mut all_rules: Vec<ExtractedRule> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
 
     for pattern in patterns {
@@ -216,16 +256,16 @@ pub(crate) async fn load_rules_from_globs(
 
         // r[impl validation.duplicates]
         // Check for duplicates across patterns
-        for (rule, source) in rules {
-            if seen_ids.contains(&rule.id) {
+        for extracted in rules {
+            if seen_ids.contains(&extracted.def.id) {
                 eyre::bail!(
                     "Duplicate requirement '{}' found in {}",
-                    rule.id.red(),
-                    source
+                    extracted.def.id.red(),
+                    extracted.source_file
                 );
             }
-            seen_ids.insert(rule.id.clone());
-            all_rules.push((rule, source));
+            seen_ids.insert(extracted.def.id.clone());
+            all_rules.push(extracted);
         }
     }
 
