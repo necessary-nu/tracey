@@ -59,6 +59,11 @@ pub struct Impl {
     /// r[impl config.impl.exclude]
     #[facet(kdl::children, default)]
     pub exclude: Vec<Exclude>,
+
+    /// Glob patterns for test files (only verify annotations allowed)
+    /// r[impl config.impl.test_include]
+    #[facet(kdl::children, default)]
+    pub test_include: Vec<TestInclude>,
 }
 
 #[derive(Debug, Clone, Facet)]
@@ -87,6 +92,12 @@ pub struct Include {
 
 #[derive(Debug, Clone, Facet)]
 pub struct Exclude {
+    #[facet(kdl::argument)]
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Facet)]
+pub struct TestInclude {
     #[facet(kdl::argument)]
     pub pattern: String,
 }

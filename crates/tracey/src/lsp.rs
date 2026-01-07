@@ -39,6 +39,8 @@ const SEMANTIC_TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
 /// r[impl cli.lsp]
 pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<()> {
     use crate::serve::build_dashboard_data;
+    use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
+    use std::time::Duration;
 
     // Determine project root
     let project_root = match root {
@@ -54,10 +56,41 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
     let initial_data = build_dashboard_data(&project_root, &config, 1, true).await?;
 
     // Create watch channel for data
-    let (_data_tx, data_rx) = watch::channel(Arc::new(initial_data));
+    let (data_tx, data_rx) = watch::channel(Arc::new(initial_data));
 
-    // TODO: Add file watching to rebuild data on changes
-    // For now, LSP just uses the initial data snapshot
+    // r[impl lsp.lifecycle.config-watch]
+    // Spawn file watcher for config and source files
+    let watch_root = project_root.clone();
+    let watch_config_path = config_path.clone();
+    tokio::spawn(async move {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut debouncer = match new_debouncer(Duration::from_millis(500), tx) {
+            Ok(d) => d,
+            Err(_) => return, // Silent fail - LSP will work without watching
+        };
+
+        // Watch the config file specifically
+        if let Some(config_dir) = watch_config_path.parent() {
+            let _ = debouncer
+                .watcher()
+                .watch(config_dir, RecursiveMode::NonRecursive);
+        }
+
+        // Watch the entire project root for source file changes
+        let _ = debouncer
+            .watcher()
+            .watch(&watch_root, RecursiveMode::Recursive);
+
+        while let Ok(Ok(_events)) = rx.recv() {
+            // Reload config and rebuild data
+            if let Ok(new_config) = crate::load_config(&watch_config_path)
+                && let Ok(new_data) = build_dashboard_data(&watch_root, &new_config, 1, true).await
+            {
+                let _ = data_tx.send(Arc::new(new_data));
+            }
+        }
+    });
 
     // Run LSP server
     run_lsp_server(data_rx, project_root).await
@@ -176,7 +209,7 @@ impl Backend {
     /// r[impl lsp.diagnostics.broken-refs]
     /// r[impl lsp.diagnostics.unknown-prefix]
     /// r[impl lsp.diagnostics.unknown-verb]
-    fn compute_diagnostics(&self, _uri: &Url, content: &str) -> Vec<Diagnostic> {
+    fn compute_diagnostics(&self, uri: &Url, content: &str) -> Vec<Diagnostic> {
         use tracey_core::{RefVerb, Reqs, WarningKind};
 
         let mut diagnostics = Vec::new();
@@ -204,8 +237,33 @@ impl Backend {
         // Extract references from the content
         let reqs = Reqs::extract_from_content(std::path::Path::new(""), content);
 
+        // r[impl lsp.diagnostics.impl-in-test]
+        // Check if this file is a test file (only verify allowed)
+        let data = self.data();
+        let is_test_file = uri
+            .to_file_path()
+            .ok()
+            .map(|p| data.test_files.contains(&p))
+            .unwrap_or(false);
+
         // Check each reference
         for reference in &reqs.references {
+            // r[impl lsp.diagnostics.impl-in-test]
+            // r[impl config.impl.test_include.verify-only]
+            if is_test_file && matches!(reference.verb, RefVerb::Impl) {
+                let start = offset_to_position(reference.span.offset);
+                let end = offset_to_position(reference.span.offset + reference.span.length);
+                diagnostics.push(Diagnostic {
+                    range: Range { start, end },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: Some(NumberOrString::String("impl-in-test".to_string())),
+                    source: Some("tracey".to_string()),
+                    message: "Test files may only contain 'verify' annotations, not 'impl'"
+                        .to_string(),
+                    ..Default::default()
+                });
+                continue;
+            }
             // r[impl lsp.diagnostics.unknown-prefix]
             if !prefixes.contains(&reference.prefix) {
                 let start = offset_to_position(reference.span.offset);
@@ -266,6 +324,71 @@ impl Backend {
                         "Unknown verb '{}'. Valid verbs: impl, verify, depends, related",
                         verb
                     ),
+                    ..Default::default()
+                });
+            }
+        }
+
+        // Check definitions for duplicates and orphaned rules
+        // (data was already retrieved above for test file check)
+
+        // r[impl lsp.diagnostics.duplicate-definition]
+        // Count definitions per ID to detect duplicates
+        let definitions: Vec<_> = reqs
+            .references
+            .iter()
+            .filter(|r| matches!(r.verb, RefVerb::Define))
+            .collect();
+
+        // Check each definition in this file
+        for (i, def) in definitions.iter().enumerate() {
+            // Check for duplicates within this file
+            let duplicate_in_file = definitions
+                .iter()
+                .enumerate()
+                .any(|(j, other)| i != j && other.req_id == def.req_id);
+
+            // Check for duplicates in other spec files (via global data)
+            let duplicate_in_other_file = data.forward_by_impl.values().any(|spec| {
+                spec.rules.iter().any(|rule| {
+                    rule.id == def.req_id
+                        && rule
+                            .source_file
+                            .as_ref()
+                            .is_some_and(|f| !uri.path().ends_with(f))
+                })
+            });
+
+            if duplicate_in_file || duplicate_in_other_file {
+                let start = offset_to_position(def.span.offset);
+                let end = offset_to_position(def.span.offset + def.span.length);
+                diagnostics.push(Diagnostic {
+                    range: Range { start, end },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: Some(NumberOrString::String("duplicate-definition".to_string())),
+                    source: Some("tracey".to_string()),
+                    message: format!("Duplicate requirement definition '{}'", def.req_id),
+                    ..Default::default()
+                });
+            }
+
+            // r[impl lsp.diagnostics.orphaned]
+            // Check if this definition has any implementations
+            let has_impl = data.forward_by_impl.values().any(|spec| {
+                spec.rules
+                    .iter()
+                    .any(|rule| rule.id == def.req_id && !rule.impl_refs.is_empty())
+            });
+
+            if !has_impl {
+                let start = offset_to_position(def.span.offset);
+                let end = offset_to_position(def.span.offset + def.span.length);
+                diagnostics.push(Diagnostic {
+                    range: Range { start, end },
+                    severity: Some(DiagnosticSeverity::HINT),
+                    code: Some(NumberOrString::String("orphaned".to_string())),
+                    source: Some("tracey".to_string()),
+                    message: format!("Requirement '{}' has no implementations", def.req_id),
                     ..Default::default()
                 });
             }

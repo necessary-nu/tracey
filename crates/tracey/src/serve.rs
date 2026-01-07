@@ -102,6 +102,9 @@ pub struct DashboardData {
     pub content_hash: u64,
     /// Delta from previous build (what changed)
     pub delta: crate::server::Delta,
+    /// Files matched by test_include patterns (only verify allowed)
+    /// r[impl config.impl.test_include]
+    pub test_files: std::collections::HashSet<PathBuf>,
 }
 
 /// Shared application state
@@ -484,6 +487,44 @@ pub async fn build_dashboard_data(
     let mut all_file_contents: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut all_search_rules: Vec<search::RuleEntry> = Vec::new();
 
+    // r[impl config.impl.test_include]
+    // Collect all test file patterns and find matching files
+    let mut test_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for spec_config in &config.specs {
+        for impl_config in &spec_config.impls {
+            let test_patterns: Vec<&str> = impl_config
+                .test_include
+                .iter()
+                .map(|t| t.pattern.as_str())
+                .collect();
+            if !test_patterns.is_empty() {
+                // Walk files and match against test patterns
+                let walker = ignore::WalkBuilder::new(project_root)
+                    .follow_links(true)
+                    .hidden(false)
+                    .git_ignore(true)
+                    .build();
+                for entry in walker.flatten() {
+                    let Some(ft) = entry.file_type() else {
+                        continue;
+                    };
+                    if ft.is_file() {
+                        let path = entry.path();
+                        if let Ok(relative) = path.strip_prefix(project_root) {
+                            let relative_str = relative.to_string_lossy();
+                            for pattern in &test_patterns {
+                                if glob_match(&relative_str, pattern) {
+                                    test_files.insert(path.to_path_buf());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     for spec_config in &config.specs {
         let spec_name = &spec_config.name.value;
         let include_patterns: Vec<&str> = spec_config
@@ -846,6 +887,7 @@ pub async fn build_dashboard_data(
         version,
         content_hash,
         delta: crate::server::Delta::default(),
+        test_files,
     })
 }
 
