@@ -178,8 +178,8 @@ function OutlineTree({
             ? "is-in-active-branch"
             : ""} ${isComplete ? "is-complete" : ""} ${isIncomplete ? "is-incomplete" : ""}"
         >
-          <div class="toc-row">
-            <a href=${`/${specName}/${impl}/spec#${h.slug}`} class="toc-link"> ${h.title} </a>
+          <a class="toc-row" href=${`/${specName}/${impl}/spec#${h.slug}`}>
+            <span class="toc-link"> ${h.title} </span>
             ${showCoverage &&
             html`
               <span class="toc-badges" aria-label="coverage">
@@ -199,7 +199,7 @@ function OutlineTree({
                 />
               </span>
             `}
-          </div>
+          </a>
           ${hasChildren &&
           html`
             <ul class="toc-children ${hasActiveChild ? "has-active" : ""}">

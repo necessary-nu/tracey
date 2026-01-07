@@ -1742,13 +1742,15 @@ a.rule-marker:hover {
     list-style: none;
 }
 
-/* Row containing link + badges */
+/* Row containing link + badges - now an anchor element */
 .toc-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     padding: 0.25rem 0.5rem;
     border-radius: 6px;
+    text-decoration: none;
+    color: inherit;
 }
 
 /* Title takes remaining width, ellipsizes nicely */
