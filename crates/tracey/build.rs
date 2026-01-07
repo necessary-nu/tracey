@@ -12,6 +12,10 @@ fn main() {
     println!("cargo:rerun-if-changed=dashboard/index.html");
     println!("cargo:rerun-if-changed=dashboard/package.json");
     println!("cargo:rerun-if-changed=dashboard/vite.config.ts");
+    // Re-run if output is missing (so deleting dist triggers rebuild)
+    println!("cargo:rerun-if-changed=dashboard/dist/index.html");
+    println!("cargo:rerun-if-changed=dashboard/dist/assets/index.js");
+    println!("cargo:rerun-if-changed=dashboard/dist/assets/index.css");
 
     // Skip build if dist already exists (for faster incremental builds)
     // To force rebuild, delete the dist directory

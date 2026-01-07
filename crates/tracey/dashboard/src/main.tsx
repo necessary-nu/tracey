@@ -11,6 +11,7 @@ import { type UseApiResult, useApi } from "./hooks";
 import { buildUrl } from "./router";
 // Types
 import type {
+  ButtonProps,
   FilePathProps,
   FileRefProps,
   HeaderProps,
@@ -59,6 +60,11 @@ function LucideIcon({ name, className = "" }: LucideIconProps) {
   }, [name]);
 
   return html`<span ref=${iconRef} class=${className}></span>`;
+}
+
+function Button({ onClick, children, variant = "primary", size = "md", className = "" }: ButtonProps) {
+  const classes = `btn btn-${variant} btn-${size} ${className}`.trim();
+  return html`<button class=${classes} onClick=${onClick}>${children}</button>`;
 }
 
 // Language icon component - uses devicon if available, falls back to Lucide
@@ -591,7 +597,23 @@ function App() {
     }
   }, []);
 
-  if (error) return html`<div class="loading">Error: ${error}</div>`;
+  if (error) {
+    const goHome = () => {
+      route("/");
+      apiResult.refetch();
+    };
+    return html`
+      <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 2rem;">
+        <div style="text-align: center;">
+          <h2 style="margin: 0 0 1rem 0; font-size: 1.5rem;">Page Not Found</h2>
+          <p style="color: var(--fg-muted); margin: 0 0 1.5rem 0;">
+            This page doesn't exist.
+          </p>
+          <${Button} onClick=${goHome}>Go Home<//>
+        </div>
+      </div>
+    `;
+  }
   if (!data) return html`<div class="loading">Loading...</div>`;
 
   const { config, forward, reverse } = data;
@@ -727,7 +749,18 @@ function App() {
             default
             component=${() => {
               // r[impl dashboard.url.invalid-spec]
-              return html`<div class="empty-state">Page not found</div>`;
+              const path = window.location.pathname;
+              return html`
+                <div class="empty-state">
+                  <h2>Page Not Found</h2>
+                  <p style="color: var(--text-secondary); margin: 1rem 0;">
+                    <code style="background: var(--bg-tertiary); padding: 0.25rem 0.5rem; border-radius: 4px;">${path}</code>
+                  </p>
+                  <p style="color: var(--text-secondary); margin: 1rem 0;">
+                    This page doesn't exist. Try navigating from the sidebar or go to the <a href="/" style="color: var(--accent-primary);">home page</a>.
+                  </p>
+                </div>
+              `;
             }}
           />
         <//>

@@ -9,7 +9,7 @@ use facet::Facet;
 use facet_kdl as kdl;
 
 /// Root configuration for tracey
-#[derive(Debug, Clone, Facet)]
+#[derive(Debug, Clone, Default, Facet)]
 pub struct Config {
     /// Specifications to track coverage against
     #[facet(kdl::children, default)]

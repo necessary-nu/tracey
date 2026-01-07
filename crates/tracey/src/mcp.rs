@@ -129,6 +129,14 @@ pub struct ConfigIncludeTool {
     pub pattern: String,
 }
 
+/// Reload configuration and rebuild data
+#[mcp_tool(
+    name = "tracey_reload",
+    description = "Reload the configuration file and rebuild all data. Use this after creating or modifying the config file."
+)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ReloadTool {}
+
 // Generate the toolbox enum
 tool_box!(
     TraceyTools,
@@ -140,7 +148,8 @@ tool_box!(
         RuleTool,
         ConfigTool,
         ConfigExcludeTool,
-        ConfigIncludeTool
+        ConfigIncludeTool,
+        ReloadTool
     ]
 );
 
@@ -157,14 +166,21 @@ pub struct TraceyHandler {
     last_delta: std::sync::Mutex<Delta>,
     /// Path to config file for persistence
     config_path: PathBuf,
+    /// Channel to trigger manual reload
+    reload_tx: tokio::sync::mpsc::Sender<()>,
 }
 
 impl TraceyHandler {
-    pub fn new(data: watch::Receiver<Arc<DashboardData>>, config_path: PathBuf) -> Self {
+    pub fn new(
+        data: watch::Receiver<Arc<DashboardData>>,
+        config_path: PathBuf,
+        reload_tx: tokio::sync::mpsc::Sender<()>,
+    ) -> Self {
         Self {
             data,
             last_delta: std::sync::Mutex::new(Delta::default()),
             config_path,
+            reload_tx,
         }
     }
 
@@ -556,6 +572,23 @@ impl TraceyHandler {
         out
     }
 
+    // r[impl mcp.tool.reload]
+    async fn handle_reload(&self) -> String {
+        let mut out = String::new();
+
+        // Trigger reload via channel
+        if self.reload_tx.send(()).await.is_ok() {
+            // Wait a moment for rebuild to complete
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            out.push_str("Configuration reloaded successfully.\n\n");
+            out.push_str(&self.format_header());
+        } else {
+            out.push_str("Error: Failed to trigger reload\n");
+        }
+
+        out
+    }
+
     // r[impl mcp.config.persist]
     fn save_config(&self, config: &crate::config::Config) -> Result<()> {
         use std::io::Write;
@@ -630,6 +663,7 @@ impl ServerHandler for TraceyHandler {
                     None => "Error: pattern is required".to_string(),
                 }
             }
+            "tracey_reload" => self.handle_reload().await,
             other => format!("Unknown tool: {}", other),
         };
 
@@ -655,11 +689,12 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
         None => crate::find_project_root()?,
     };
 
-    // Load config
+    // r[impl config.optional]
+    // Load config if it exists, otherwise start with empty config
     let config_path = config_path.unwrap_or_else(|| project_root.join(".config/tracey/config.kdl"));
-    let config = crate::load_config(&config_path)?;
+    let config = crate::load_config_or_default(&config_path);
 
-    // Build initial dashboard data
+    // Build initial dashboard data (may be empty if no config)
     let initial_data: DashboardData = build_dashboard_data(&project_root, &config, 1, true).await?;
 
     // r[impl server.state.shared] - Create watch channel for data updates
@@ -667,6 +702,9 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
 
     // Create channel for file watcher debouncing
     let (debounce_tx, mut debounce_rx) = mpsc::channel::<()>(1);
+
+    // Create channel for manual reload requests
+    let (reload_tx, mut reload_rx) = mpsc::channel::<()>(1);
 
     // r[impl server.watch.sources]
     // r[impl server.watch.specs]
@@ -724,18 +762,22 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
     let version = Arc::new(AtomicU64::new(1));
 
     tokio::spawn(async move {
-        while debounce_rx.recv().await.is_some() {
+        loop {
+            // Wait for either file watcher or manual reload
+            tokio::select! {
+                _ = debounce_rx.recv() => {}
+                _ = reload_rx.recv() => {}
+            }
+
             // r[impl server.watch.config] - Reload config on changes
-            let config = match crate::load_config(&rebuild_config_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+            // r[impl config.watch-creation] - Also handles config file creation
+            // r[impl mcp.tool.reload] - Also handles manual reload requests
+            let config = crate::load_config_or_default(&rebuild_config_path);
 
             let old_data = rebuild_rx.borrow().clone();
 
             if let Ok(mut data) =
                 build_dashboard_data(&rebuild_project_root, &config, 0, true).await
-                && data.content_hash != old_data.content_hash
             {
                 // r[impl server.state.version] - Increment version on data changes
                 let new_version = version.fetch_add(1, Ordering::SeqCst) + 1;
@@ -747,7 +789,7 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
     });
 
     // Create MCP handler
-    let handler = TraceyHandler::new(data_rx, config_path.clone());
+    let handler = TraceyHandler::new(data_rx, config_path.clone(), reload_tx);
 
     // Configure server
     let server_details = InitializeResult {

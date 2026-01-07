@@ -1212,7 +1212,9 @@ async fn api_forward(
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .body(Body::from(
+                r#"{"error":"No specs configured","code":"no_specs"}"#,
+            ))
             .unwrap()
             .into_response();
     };
@@ -1246,7 +1248,9 @@ async fn api_reverse(
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .body(Body::from(
+                r#"{"error":"No specs configured","code":"no_specs"}"#,
+            ))
             .unwrap()
             .into_response();
     };
@@ -1433,7 +1437,9 @@ async fn api_file(
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .body(Body::from(
+                r#"{"error":"No specs configured","code":"no_specs"}"#,
+            ))
             .unwrap()
             .into_response();
     };
@@ -1766,7 +1772,9 @@ async fn api_spec(
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"error":"No specs configured"}"#))
+            .body(Body::from(
+                r#"{"error":"No specs configured","code":"no_specs"}"#,
+            ))
             .unwrap()
             .into_response();
     };

@@ -45,11 +45,12 @@ pub async fn run(root: Option<PathBuf>, config_path: Option<PathBuf>) -> Result<
         None => crate::find_project_root()?,
     };
 
-    // Load config
+    // r[impl config.optional]
+    // Load config if it exists, otherwise start with empty config
     let config_path = config_path.unwrap_or_else(|| project_root.join(".config/tracey/config.kdl"));
+    let config = crate::load_config_or_default(&config_path);
 
     // Build initial dashboard data (quiet mode - no stderr output since LSP uses stdio)
-    let config = crate::load_config(&config_path)?;
     let initial_data = build_dashboard_data(&project_root, &config, 1, true).await?;
 
     // Run LSP server

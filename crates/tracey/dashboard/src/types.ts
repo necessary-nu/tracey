@@ -10,6 +10,7 @@ import type {
 	OutlineEntry,
 	SpecSection,
 } from "./api-types";
+import type { ComponentChildren } from "preact";
 
 // Re-export with local aliases for backwards compatibility
 export type Config = ApiConfig;
@@ -247,4 +248,12 @@ export interface FileRefProps {
   line: number;
   type: "impl" | "verify";
   onSelectFile: (path: string, line?: number | null) => void;
+}
+
+export interface ButtonProps {
+  onClick: () => void;
+  children: ComponentChildren;
+  variant?: "primary" | "secondary" | "ghost";
+  size?: "sm" | "md";
+  className?: string;
 }

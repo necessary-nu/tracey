@@ -357,3 +357,17 @@ pub(crate) fn load_config(path: &PathBuf) -> Result<Config> {
 
     Ok(config)
 }
+
+/// r[impl config.optional]
+/// Load config if it exists, otherwise return default empty config.
+/// This allows services to start without a config file.
+pub(crate) fn load_config_or_default(path: &PathBuf) -> Config {
+    if !path.exists() {
+        return Config::default();
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => facet_kdl::from_str(&content).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}

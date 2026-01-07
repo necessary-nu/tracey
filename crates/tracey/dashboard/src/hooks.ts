@@ -9,9 +9,37 @@ import type {
 	SpecContent,
 } from "./types";
 
+export class ApiError extends Error {
+	constructor(
+		public status: number,
+		public code: string,
+		message: string,
+	) {
+		super(message);
+		this.name = "ApiError";
+	}
+
+	get isNoConfig(): boolean {
+		return this.status === 404 && this.code === "no_specs";
+	}
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
 	const res = await fetch(url);
-	if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	if (!res.ok) {
+		// Try to parse error response
+		try {
+			const body = await res.json();
+			throw new ApiError(
+				res.status,
+				body.code || "unknown",
+				body.error || `HTTP ${res.status}`,
+			);
+		} catch (e) {
+			if (e instanceof ApiError) throw e;
+			throw new ApiError(res.status, "unknown", `HTTP ${res.status}`);
+		}
+	}
 	return res.json();
 }
 
