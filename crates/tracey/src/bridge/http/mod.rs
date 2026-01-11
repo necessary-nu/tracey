@@ -62,7 +62,7 @@ struct AppState {
 /// translates REST API requests to RPC calls.
 pub async fn run(
     root: Option<PathBuf>,
-    _config_path: Option<PathBuf>,
+    _config_path: PathBuf,
     port: u16,
     open: bool,
     dev: bool,
@@ -339,7 +339,7 @@ async fn api_forward(
     let (spec, impl_name) = resolve_spec_impl(query.spec, query.impl_name, &config);
 
     match client.forward(spec, impl_name).await {
-        Ok(Some(data)) => Json(data).into_response(),
+        Ok(Some(data)) => Json(ApiForwardData { specs: vec![data] }).into_response(),
         Ok(None) => ApiError::not_found("Spec/impl not found"),
         Err(e) => ApiError::rpc_error(e),
     }

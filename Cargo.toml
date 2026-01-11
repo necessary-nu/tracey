@@ -18,11 +18,11 @@ tracey-core = { path = "crates/tracey-core", version = "1.0.0" }
 tracey-api = { path = "crates/tracey-api", version = "1.0.0" }
 tracey-proto = { path = "crates/tracey-proto", version = "1.0.0" }
 
-# Facet ecosystem (from git for facet-miette support)
+# Facet ecosystem
 facet = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
 facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
 facet-axum = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
-facet-kdl = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
+facet-yaml = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
 facet-json = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
 facet-error = { git = "https://github.com/facet-rs/facet", branch = "main", version = "0.42.0" }
 
@@ -57,6 +57,7 @@ arborium-go = "2"
 arborium-java = "2"
 arborium-python = "2"
 arborium-typescript = "2"
+arborium-php = "2"
 
 # HTTP server for serve command
 axum = { version = "0.8", features = ["ws"] }
