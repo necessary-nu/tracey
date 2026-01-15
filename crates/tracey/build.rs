@@ -89,6 +89,26 @@ fn build_dashboard() {
             eprintln!("Found node {}", version.trim());
         }
         _ => {
+            #[cfg(windows)]
+            panic!(
+                "\n\
+                Node.js is required but not found!\n\
+                \n\
+                Install Node.js using Chocolatey:\n\
+                \n\
+                  # First, install Chocolatey (if not already installed):\n\
+                  powershell -c \"irm https://community.chocolatey.org/install.ps1|iex\"\n\
+                \n\
+                  # Then install Node.js:\n\
+                  choco install nodejs\n\
+                \n\
+                  # Verify installation:\n\
+                  node -v\n\
+                \n\
+                See https://nodejs.org/en/download for more options.\n"
+            );
+
+            #[cfg(not(windows))]
             panic!(
                 "\n\
                 Node.js is required but not found!\n\
@@ -97,12 +117,6 @@ fn build_dashboard() {
                 \n\
                   # On macOS with Homebrew:\n\
                   brew install node\n\
-                \n\
-                  # On Windows with Scoop:\n\
-                  scoop install nodejs\n\
-                \n\
-                  # On Windows with Chocolatey:\n\
-                  choco install nodejs\n\
                 \n\
                   # Using fnm (Fast Node Manager):\n\
                   curl -fsSL https://fnm.vercel.app/install | bash\n\
@@ -126,29 +140,39 @@ fn build_dashboard() {
             eprintln!("Found pnpm {}", version.trim());
         }
         _ => {
+            #[cfg(windows)]
+            panic!(
+                "\n\
+                pnpm is required but not found!\n\
+                \n\
+                Install pnpm using Corepack (recommended, included with Node.js):\n\
+                \n\
+                  corepack enable pnpm\n\
+                \n\
+                  # Verify installation:\n\
+                  pnpm -v\n\
+                \n\
+                See https://pnpm.io/installation for more options.\n"
+            );
+
+            #[cfg(not(windows))]
             panic!(
                 "\n\
                 pnpm is required but not found!\n\
                 \n\
                 Install pnpm using one of the following methods:\n\
                 \n\
-                  # Using npm (Node.js must be installed):\n\
-                  npm install -g pnpm\n\
-                \n\
-                  # Using Corepack (Node.js 16.13+ includes Corepack):\n\
+                  # Using Corepack (recommended, included with Node.js 16.13+):\n\
                   corepack enable pnpm\n\
+                \n\
+                  # Using npm:\n\
+                  npm install -g pnpm\n\
                 \n\
                   # On macOS with Homebrew:\n\
                   brew install pnpm\n\
                 \n\
-                  # On Windows with Scoop:\n\
-                  scoop install pnpm\n\
-                \n\
-                  # Standalone script (POSIX):\n\
+                  # Standalone script:\n\
                   curl -fsSL https://get.pnpm.io/install.sh | sh -\n\
-                \n\
-                  # Standalone script (Windows PowerShell):\n\
-                  iwr https://get.pnpm.io/install.ps1 -useb | iex\n\
                 \n\
                 See https://pnpm.io/installation for more options.\n"
             );
