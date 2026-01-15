@@ -80,8 +80,13 @@ fn build_dashboard() {
         return;
     }
 
+    #[cfg(windows)]
+    const NODE: &str = "node.exe";
+    #[cfg(not(windows))]
+    const NODE: &str = "node";
+
     // Check if node is available
-    let node_check = Command::new("node").arg("--version").output();
+    let node_check = Command::new(NODE).arg("--version").output();
 
     match node_check {
         Ok(output) if output.status.success() => {
@@ -131,8 +136,13 @@ fn build_dashboard() {
         }
     }
 
+    #[cfg(windows)]
+    const PNPM: &str = "pnpm.cmd";
+    #[cfg(not(windows))]
+    const PNPM: &str = "pnpm";
+
     // Check if pnpm is available
-    let pnpm_check = Command::new("pnpm").arg("--version").output();
+    let pnpm_check = Command::new(PNPM).arg("--version").output();
 
     match pnpm_check {
         Ok(output) if output.status.success() => {
@@ -182,7 +192,7 @@ fn build_dashboard() {
     eprintln!("Building dashboard with pnpm...");
 
     // Install dependencies if needed
-    let status = Command::new("pnpm")
+    let status = Command::new(PNPM)
         .args(["install", "--frozen-lockfile"])
         .current_dir(dashboard_dir)
         .status()
@@ -193,7 +203,7 @@ fn build_dashboard() {
     }
 
     // Build the dashboard
-    let status = Command::new("pnpm")
+    let status = Command::new(PNPM)
         .args(["run", "build"])
         .current_dir(dashboard_dir)
         .status()
