@@ -863,6 +863,12 @@ The `tracey logs` command MUST display the daemon's log output from `.tracey/dae
 > r[daemon.cli.logs.lines]
 > The `--lines` flag MUST control how many historical lines to display (default: 50).
 
+r[daemon.cli.status]
+The `tracey status` command MUST display the daemon's current status, including uptime, watcher state, and any errors.
+
+r[daemon.cli.kill]
+The `tracey kill` command MUST send a shutdown signal to the running daemon and clean up any stale sockets.
+
 r[daemon.logs.file]
 The daemon MUST write all log output to `.tracey/daemon.log` in the workspace root.
 

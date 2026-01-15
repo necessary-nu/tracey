@@ -138,7 +138,7 @@ fn main() -> Result<()> {
             open,
             dev,
         }) => {
-            init_tracing();
+            init_tracing(TracingConfig { log_file: None })?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(bridge::http::run(
                 root,
@@ -163,9 +163,6 @@ fn main() -> Result<()> {
         }
         // r[impl daemon.cli.daemon]
         Some(Command::Daemon { root, config }) => {
-            use tracing_subscriber::layer::SubscriberExt;
-            use tracing_subscriber::util::SubscriberInitExt;
-
             let project_root = root.unwrap_or_else(|| find_project_root().unwrap_or_default());
             // r[impl config.path.default]
             let config_path = project_root.join(&config);
@@ -173,36 +170,11 @@ fn main() -> Result<()> {
             // Check for deprecated KDL config
             check_kdl_deprecation(&project_root)?;
 
-            // Ensure .tracey directory exists for log file
-            let tracey_dir = project_root.join(".tracey");
-            std::fs::create_dir_all(&tracey_dir)?;
-
             // r[impl daemon.logs.file]
-            // Set up file logging
-            let log_path = tracey_dir.join("daemon.log");
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)?;
-
-            // Use RUST_LOG from environment, default to info if not set
-            // Crash on invalid RUST_LOG - don't silently fall back
-            let filter = match std::env::var("RUST_LOG") {
-                Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
-                Err(_) => tracing_subscriber::EnvFilter::new("tracey=info"),
-            };
-
-            // Create both console and file layers
-            let console_layer = tracing_subscriber::fmt::layer().with_ansi(true);
-            let file_layer = tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(log_file);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(console_layer)
-                .with(file_layer)
-                .init();
+            let log_path = project_root.join(".tracey/daemon.log");
+            init_tracing(TracingConfig {
+                log_file: Some(log_path),
+            })?;
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(daemon::run(project_root, config_path))
@@ -264,14 +236,53 @@ Run 'tracey <COMMAND> --help' for more information on a command."#,
     );
 }
 
-/// Initialize tracing for bridges (console output only).
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tracey=info".parse().unwrap()),
-        )
-        .init();
+/// Configuration for tracing initialization.
+struct TracingConfig {
+    /// If Some, also log to this file (creating parent dirs as needed).
+    log_file: Option<PathBuf>,
+}
+
+/// Initialize tracing with optional file logging.
+fn init_tracing(config: TracingConfig) -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // Use RUST_LOG from environment, default to info if not set
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
+        Err(_) => tracing_subscriber::EnvFilter::new("tracey=info"),
+    };
+
+    let console_layer = tracing_subscriber::fmt::layer().with_ansi(true);
+
+    if let Some(log_path) = config.log_file {
+        // Ensure parent directory exists
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(log_file);
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .with(file_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(console_layer)
+            .init();
+    }
+
+    Ok(())
 }
 
 /// r[impl daemon.cli.logs]

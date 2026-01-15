@@ -171,7 +171,8 @@ async fn create_test_service_with_watcher() -> (tracey::daemon::TraceyService, A
     watcher_state.set_watched_dirs(vec!["/test/dir".into()]);
     watcher_state.record_event();
 
-    let service = TraceyService::new_with_watcher(engine, Arc::clone(&watcher_state));
+    let (service, _shutdown_rx) =
+        TraceyService::new_with_watcher(engine, Arc::clone(&watcher_state));
 
     (service, watcher_state)
 }
