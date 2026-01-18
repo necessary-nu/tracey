@@ -35,7 +35,7 @@ enum Command {
         root: Option<PathBuf>,
 
         /// Path to config file
-        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.yaml")]
+        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.styx")]
         config: PathBuf,
 
         /// Port to listen on (default: 3000)
@@ -58,7 +58,7 @@ enum Command {
         root: Option<PathBuf>,
 
         /// Path to config file
-        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.yaml")]
+        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.styx")]
         config: PathBuf,
     },
 
@@ -69,7 +69,7 @@ enum Command {
         root: Option<PathBuf>,
 
         /// Path to config file
-        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.yaml")]
+        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.styx")]
         config: PathBuf,
     },
 
@@ -80,7 +80,7 @@ enum Command {
         root: Option<PathBuf>,
 
         /// Path to config file
-        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.yaml")]
+        #[facet(args::named, args::short = 'c', default = ".config/tracey/config.styx")]
         config: PathBuf,
     },
 
@@ -167,8 +167,8 @@ fn main() -> Result<()> {
             // r[impl config.path.default]
             let config_path = project_root.join(&config);
 
-            // Check for deprecated KDL config
-            check_kdl_deprecation(&project_root)?;
+            // Check for deprecated configs
+            check_deprecated_configs(&project_root)?;
 
             // r[impl daemon.logs.file]
             let log_path = project_root.join(".tracey/daemon.log");
@@ -513,30 +513,64 @@ async fn kill_daemon(root: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Check for deprecated KDL config file and error if found
-fn check_kdl_deprecation(project_root: &std::path::Path) -> Result<()> {
+/// Check for deprecated config files and error if found
+fn check_deprecated_configs(project_root: &std::path::Path) -> Result<()> {
     let kdl_config = project_root.join(".config/tracey/config.kdl");
+    let yaml_config = project_root.join(".config/tracey/config.yaml");
+
     if kdl_config.exists() {
         eyre::bail!(
             "Found deprecated config file: {}\n\n\
-             Tracey now uses YAML configuration. Please:\n\
+             Tracey now uses Styx configuration. Please:\n\
              1. Rename {} to {}\n\
-             2. Convert the contents from KDL to YAML format\n\n\
-             Example YAML config:\n\
+             2. Convert the contents from KDL to Styx format\n\n\
+             Example Styx config:\n\
              \n\
-             specs:\n\
-               - name: my-spec\n\
-                 prefix: r\n\
-                 include:\n\
-                   - \"docs/**/*.md\"\n\
-                 impls:\n\
-                   - name: rust\n\
-                     include:\n\
-                       - \"src/**/*.rs\"\n",
+             specs (\n\
+               {{\n\
+                 name my-spec\n\
+                 prefix r\n\
+                 include (docs/**/*.md)\n\
+                 impls (\n\
+                   {{\n\
+                     name rust\n\
+                     include (src/**/*.rs)\n\
+                   }}\n\
+                 )\n\
+               }}\n\
+             )\n",
             kdl_config.display(),
             "config.kdl".red(),
-            "config.yaml".green(),
+            "config.styx".green(),
         );
     }
+
+    if yaml_config.exists() {
+        eyre::bail!(
+            "Found deprecated config file: {}\n\n\
+             Tracey now uses Styx configuration. Please:\n\
+             1. Rename {} to {}\n\
+             2. Convert the contents from YAML to Styx format\n\n\
+             Example Styx config:\n\
+             \n\
+             specs (\n\
+               {{\n\
+                 name my-spec\n\
+                 prefix r\n\
+                 include (docs/**/*.md)\n\
+                 impls (\n\
+                   {{\n\
+                     name rust\n\
+                     include (src/**/*.rs)\n\
+                   }}\n\
+                 )\n\
+               }}\n\
+             )\n",
+            yaml_config.display(),
+            "config.yaml".red(),
+            "config.styx".green(),
+        );
+    }
+
     Ok(())
 }

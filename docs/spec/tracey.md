@@ -411,11 +411,11 @@ Requirement references in comments associated with a code unit MUST be extracted
 
 ## Configuration
 
-r[config.format.yaml]
-The configuration file MUST be in YAML format.
+r[config.format.styx]
+The configuration file MUST be in Styx format.
 
 r[config.path.default]
-The default configuration path MUST be `.config/tracey/config.yaml` relative to the project root.
+The default configuration path MUST be `.config/tracey/config.styx` relative to the project root.
 
 r[config.optional]
 The configuration file MUST be optional. The MCP server, HTTP server, and LSP MUST start correctly even when no configuration file exists, providing empty/default responses until a configuration is available.
@@ -426,28 +426,34 @@ When started without a configuration file, tracey MUST watch for the creation of
 > r[config.schema]
 > The configuration MUST follow this schema:
 >
-> ```yaml
-> specs:
->   - name: tracey
->     prefix: r
->     include:
->       - docs/spec/**/*.md
->     impls:
->       - name: rust
->         include:
->           - crates/**/*.rs
->         exclude:
->           - target/**
+> ```styx
+> specs (
+>   {
+>     name tracey
+>     prefix r
+>     include (docs/spec/**/*.md)
+>     impls (
+>       {
+>         name rust
+>         include (crates/**/*.rs)
+>         exclude (target/**)
+>       }
+>     )
+>   }
 >
->   - name: messaging-protocol
->     prefix: m
->     include:
->       - vendor/messaging-spec/**/*.md
->     source_url: https://github.com/example/messaging-spec
->     impls:
->       - name: rust
->         include:
->           - crates/**/*.rs
+>   {
+>     name messaging-protocol
+>     prefix m
+>     include (vendor/messaging-spec/**/*.md)
+>     source_url https://github.com/example/messaging-spec
+>     impls (
+>       {
+>         name rust
+>         include (crates/**/*.rs)
+>       }
+>     )
+>   }
+> )
 > ```
 
 r[config.spec.name]
@@ -479,18 +485,21 @@ Files matched by `test_include` patterns MUST only contain `verify` annotations.
 
 Example configuration separating implementation and test files:
 
-```yaml
-specs:
-  - name: myapp
-    prefix: r
-    include:
-      - docs/spec/**/*.md
-    impls:
-      - name: rust
-        include:
-          - src/**/*.rs
-        test_include:
-          - tests/**/*.rs
+```styx
+specs (
+  {
+    name myapp
+    prefix r
+    include (docs/spec/**/*.md)
+    impls (
+      {
+        name rust
+        include (src/**/*.rs)
+        test_include (tests/**/*.rs)
+      }
+    )
+  }
+)
 ```
 
 In this example, `src/auth.rs` may contain `r[impl auth.token]` but `tests/auth_test.rs` may only contain `r[verify auth.token]`.
@@ -505,30 +514,36 @@ Requirement IDs MUST be unique within a single spec, but MAY be duplicated acros
 
 Example: implementing both your own spec and an external specification:
 
-```yaml
-specs:
-  # Your project's internal specification
-  - name: myapp
-    prefix: r
-    include:
-      - docs/spec/**/*.md
-    impls:
-      - name: rust
-        include:
-          - src/**/*.rs
-        test_include:
-          - tests/**/*.rs
+```styx
+specs (
+  // Your project's internal specification
+  {
+    name myapp
+    prefix r
+    include (docs/spec/**/*.md)
+    impls (
+      {
+        name rust
+        include (src/**/*.rs)
+        test_include (tests/**/*.rs)
+      }
+    )
+  }
 
-  # External HTTP/2 specification (obtained via git submodule)
-  - name: http2
-    prefix: h2
-    source_url: https://github.com/http2/spec
-    include:
-      - vendor/http2-spec/docs/**/*.md
-    impls:
-      - name: rust
-        include:
-          - src/http2/**/*.rs
+  // External HTTP/2 specification (obtained via git submodule)
+  {
+    name http2
+    prefix h2
+    source_url https://github.com/http2/spec
+    include (vendor/http2-spec/docs/**/*.md)
+    impls (
+      {
+        name rust
+        include (src/http2/**/*.rs)
+      }
+    )
+  }
+)
 ```
 
 With this configuration:
@@ -746,16 +761,19 @@ Both `tracey serve` (HTTP) and `tracey mcp` (MCP) share a common headless server
 > r[server.watch.patterns-from-config]
 > The file watcher MUST derive which files to watch from the configuration's `include` patterns (both spec includes and impl includes), rather than hardcoding watched directories. For example, if the config contains:
 >
-> ```yaml
-> specs:
->   - name: tracey
->     include:
->       - docs/spec/**/*.md
->     impls:
->       - name: rust
->         include:
->           - crates/**/*.rs
->           - crates/tracey/dashboard/src/**/*.tsx
+> ```styx
+> specs (
+>   {
+>     name tracey
+>     include (docs/spec/**/*.md)
+>     impls (
+>       {
+>         name rust
+>         include (crates/**/*.rs crates/tracey/dashboard/src/**/*.tsx)
+>       }
+>     )
+>   }
+> )
 > ```
 >
 > Then changes to `crates/foo/bar.rs`, `crates/tracey/dashboard/src/main.tsx`, and `docs/spec/tracey.md` should all trigger rebuilds.
@@ -767,7 +785,7 @@ r[server.watch.respect-excludes]
 The file watcher MUST respect `exclude` patterns from the configuration, not triggering rebuilds for files matching exclude patterns even if they match include patterns.
 
 r[server.watch.config-file]
-The file watcher MUST watch the configuration file itself (`.config/tracey/config.yaml`) for changes, triggering a rebuild when configuration changes.
+The file watcher MUST watch the configuration file itself (`.config/tracey/config.styx`) for changes, triggering a rebuild when configuration changes.
 
 r[server.watch.debounce]
 File change events MUST be debounced (default: 200ms) to avoid excessive recomputation during rapid edits.

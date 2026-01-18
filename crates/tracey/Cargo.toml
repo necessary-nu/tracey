@@ -37,6 +37,7 @@ tracey-proto = { path = "../tracey-proto" }
 facet = { workspace = true }
 facet-args = { workspace = true }
 facet-yaml = { workspace = true }
+facet-styx = { workspace = true }
 facet-json = { workspace = true }
 facet-axum = { workspace = true }
 

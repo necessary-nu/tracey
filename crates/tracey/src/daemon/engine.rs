@@ -49,13 +49,10 @@ impl Engine {
     pub async fn new(project_root: PathBuf, config_path: PathBuf) -> Result<Self> {
         // Load initial config - record errors but continue with empty config
         let (config, config_error) = match tokio::fs::read_to_string(&config_path).await {
-            Ok(content) => match facet_yaml::from_str(&content) {
+            Ok(content) => match facet_styx::from_str(&content) {
                 Ok(config) => (config, None),
                 Err(e) => {
-                    let error_msg =
-                        format!("Config file {} has errors: {}", config_path.display(), e);
-                    warn!("{}", error_msg);
-                    (Config::default(), Some(error_msg))
+                    eyre::bail!("Config file {} has errors:\n{}", config_path.display(), e);
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -66,10 +63,7 @@ impl Engine {
                 (Config::default(), None)
             }
             Err(e) => {
-                let error_msg =
-                    format!("Config file {} not readable: {}", config_path.display(), e);
-                warn!("{}", error_msg);
-                (Config::default(), Some(error_msg))
+                eyre::bail!("Config file {} not readable: {}", config_path.display(), e);
             }
         };
 
@@ -165,7 +159,7 @@ impl Engine {
 
         // Reload config - record errors but continue with current config
         let (config, new_config_error) = match tokio::fs::read_to_string(&self.config_path).await {
-            Ok(content) => match facet_yaml::from_str(&content) {
+            Ok(content) => match facet_styx::from_str(&content) {
                 Ok(config) => (Some(config), None),
                 Err(e) => {
                     let error_msg = format!(

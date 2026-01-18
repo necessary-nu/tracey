@@ -1,9 +1,9 @@
 //! Configuration schema for tracey
 //!
-//! r[impl config.format.yaml]
+//! r[impl config.format.styx]
 //! r[impl config.schema]
 //!
-//! Config lives at `.config/tracey/config.yaml` relative to the project root.
+//! Config lives at `.config/tracey/config.styx` relative to the project root.
 
 use facet::Facet;
 
