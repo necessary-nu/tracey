@@ -115,6 +115,12 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Handle @dump-styx-schema before argument parsing
+    if std::env::args().nth(1).as_deref() == Some("@dump-styx-schema") {
+        print_styx_schema();
+        return Ok(());
+    }
+
     let args: Args = match args::from_std_args() {
         Ok(args) => args,
         Err(e) => {
@@ -573,4 +579,56 @@ fn check_deprecated_configs(project_root: &std::path::Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print the Styx schema for tracey's configuration.
+fn print_styx_schema() {
+    print!(
+        r#"@meta {{
+  crate tracey
+  version {version}
+  bin tracey
+}}
+
+/// Root configuration for tracey
+Config @object {{
+  /// Specifications to track coverage against
+  specs @default(() @list(SpecConfig))
+}}
+
+/// Configuration for a single specification
+SpecConfig @object {{
+  /// Name of the spec (for display purposes)
+  name @string
+
+  /// Prefix used to identify this spec in annotations (e.g., "r" for r[req.id])
+  prefix @string
+
+  /// Canonical URL for the specification (e.g., a GitHub repository)
+  source_url @optional(@string)
+
+  /// Glob patterns for markdown spec files containing requirement definitions
+  include @default(() @list(@string))
+
+  /// Implementations of this spec
+  impls @default(() @list(Impl))
+}}
+
+/// Configuration for a single implementation of a spec
+Impl @object {{
+  /// Name of this implementation (e.g., "main", "core", "frontend")
+  name @string
+
+  /// Glob patterns for source files to scan
+  include @default(() @list(@string))
+
+  /// Glob patterns to exclude
+  exclude @default(() @list(@string))
+
+  /// Glob patterns for test files (only verify annotations allowed)
+  test_include @default(() @list(@string))
+}}
+"#,
+        version = env!("CARGO_PKG_VERSION")
+    );
 }
