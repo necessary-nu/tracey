@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tracey_core::code_units::CodeUnit;
 use tracey_core::is_supported_extension;
-use tracey_core::{RefVerb, ReqDefinition, Reqs};
+use tracey_core::{
+    RefVerb, ReqDefinition, Reqs, RuleId, RuleIdMatch, classify_reference_for_rule, parse_rule_id,
+};
 
 // Markdown rendering
 use marq::{
@@ -92,7 +94,7 @@ fn html_escape(s: &str) -> String {
 /// Coverage status for a rule
 #[derive(Debug, Clone)]
 struct RuleCoverage {
-    status: &'static str, // "covered", "partial", "uncovered"
+    status: &'static str, // "covered", "partial", "stale", "uncovered"
     impl_refs: Vec<ApiCodeRef>,
     verify_refs: Vec<ApiCodeRef>,
 }
@@ -168,7 +170,7 @@ impl InlineCodeHandler for TraceyInlineCodeHandler {
         if rule_id.is_empty()
             || !rule_id
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '+')
         {
             return None;
         }
@@ -256,11 +258,12 @@ impl ReqHandler for TraceyRuleHandler {
         rule: &'a ReqDefinition,
     ) -> Pin<Box<dyn Future<Output = marq::Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            let coverage = self.coverage.get(&rule.id);
+            let rule_id = rule.id.to_string();
+            let coverage = self.coverage.get(&rule_id);
             let status = coverage.map(|c| c.status).unwrap_or("uncovered");
 
             // Insert <wbr> after dots for better line breaking
-            let display_id = rule.id.replace('.', ".<wbr>");
+            let display_id = rule_id.replace('.', ".<wbr>");
 
             // Get current source file for this rule (make it absolute)
             let relative_source = self.current_source_file.lock().unwrap().clone();
@@ -275,8 +278,8 @@ impl ReqHandler for TraceyRuleHandler {
             // Segmented badge group: copy button + requirement ID
             badges_html.push_str(&format!(
                 r#"<div class="req-badge-group"><button class="req-badge req-copy req-segment-left" data-req-id="{}" title="Copy requirement ID"><svg class="req-copy-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button><a class="req-badge req-id req-segment-right" href="/{}/{}/spec#r--{}" data-rule="{}" data-source-file="{}" data-source-line="{}" title="{}">{}</a></div>"#,
-                rule.id,
-                self.spec_name, self.impl_name, rule.id, rule.id, source_file, rule.line, rule.id, display_id
+                &rule_id,
+                self.spec_name, self.impl_name, &rule_id, &rule_id, source_file, rule.line, &rule_id, display_id
             ));
 
             // Implementation badge
@@ -644,6 +647,10 @@ pub async fn build_dashboard_data_with_overlay(
 
             // Build forward data for this impl
             let mut api_rules = Vec::new();
+            let mut stale_rule_ids: std::collections::HashSet<RuleId> =
+                std::collections::HashSet::new();
+            let mut exact_rule_ids: std::collections::HashSet<RuleId> =
+                std::collections::HashSet::new();
             for extracted in &extracted_rules {
                 let mut impl_refs = Vec::new();
                 let mut verify_refs = Vec::new();
@@ -651,7 +658,7 @@ pub async fn build_dashboard_data_with_overlay(
 
                 for r in &reqs.references {
                     // r[impl ref.prefix.coverage]
-                    if r.prefix == spec_config.prefix && r.req_id == extracted.def.id {
+                    if r.prefix == spec_config.prefix {
                         // r[impl ref.cross-workspace.graceful]
                         // Canonicalize the reference file path for consistent matching
                         // Uses unwrap_or_else to gracefully handle missing files
@@ -671,16 +678,42 @@ pub async fn build_dashboard_data_with_overlay(
                             file: relative_display,
                             line: r.line,
                         };
-                        match r.verb {
-                            RefVerb::Impl | RefVerb::Define => impl_refs.push(code_ref),
-                            RefVerb::Verify => verify_refs.push(code_ref),
-                            RefVerb::Depends | RefVerb::Related => depends_refs.push(code_ref),
+                        let Some(rule_id) = parse_rule_id(&extracted.def.id.to_string()) else {
+                            continue;
+                        };
+                        match classify_reference_for_rule(&rule_id, &r.req_id) {
+                            RuleIdMatch::Exact => match r.verb {
+                                RefVerb::Impl | RefVerb::Define => {
+                                    impl_refs.push(code_ref);
+                                    exact_rule_ids.insert(rule_id.clone());
+                                }
+                                RefVerb::Verify => {
+                                    verify_refs.push(code_ref);
+                                    exact_rule_ids.insert(rule_id.clone());
+                                }
+                                RefVerb::Depends | RefVerb::Related => depends_refs.push(code_ref),
+                            },
+                            RuleIdMatch::Stale => match r.verb {
+                                RefVerb::Impl | RefVerb::Define => {
+                                    impl_refs.push(code_ref);
+                                    stale_rule_ids.insert(rule_id.clone());
+                                }
+                                RefVerb::Verify => {
+                                    verify_refs.push(code_ref);
+                                    stale_rule_ids.insert(rule_id.clone());
+                                }
+                                RefVerb::Depends | RefVerb::Related => {}
+                            },
+                            RuleIdMatch::NoMatch => {}
                         }
                     }
                 }
 
+                let Some(rule_id) = parse_rule_id(&extracted.def.id.to_string()) else {
+                    continue;
+                };
                 api_rules.push(ApiRule {
-                    id: extracted.def.id.clone(),
+                    id: rule_id,
                     raw: extracted.def.raw.clone(),
                     html: extracted.def.html.clone(),
                     status: extracted
@@ -706,7 +739,7 @@ pub async fn build_dashboard_data_with_overlay(
             // Collect rules for search index (deduplicated later)
             for r in &api_rules {
                 all_search_rules.push(search::RuleEntry {
-                    id: r.id.clone(),
+                    id: r.id.to_string(),
                     raw: r.raw.clone(),
                 });
             }
@@ -714,9 +747,14 @@ pub async fn build_dashboard_data_with_overlay(
             // Build coverage map for this impl
             let mut coverage: BTreeMap<String, RuleCoverage> = BTreeMap::new();
             for rule in &api_rules {
+                let rule_id_string = rule.id.to_string();
                 let has_impl = !rule.impl_refs.is_empty();
                 let has_verify = !rule.verify_refs.is_empty();
-                let status = if has_impl && has_verify {
+                let has_stale = stale_rule_ids.contains(&rule.id);
+                let has_exact = exact_rule_ids.contains(&rule.id);
+                let status = if has_stale && !has_exact {
+                    "stale"
+                } else if has_impl && has_verify {
                     "covered"
                 } else if has_impl || has_verify {
                     "partial"
@@ -724,7 +762,7 @@ pub async fn build_dashboard_data_with_overlay(
                     "uncovered"
                 };
                 coverage.insert(
-                    rule.id.clone(),
+                    rule_id_string,
                     RuleCoverage {
                         status,
                         impl_refs: rule.impl_refs.clone(),
@@ -1079,7 +1117,7 @@ fn build_outline(
             }
             DocElement::Req(r) => {
                 if let Some(idx) = current_heading_idx {
-                    let cov = coverage.get(&r.id);
+                    let cov = coverage.get(&r.id.to_string());
                     let has_impl = cov.is_some_and(|c| !c.impl_refs.is_empty());
                     let has_verify = cov.is_some_and(|c| !c.verify_refs.is_empty());
 

@@ -31,13 +31,27 @@ export interface ValidationError {
   /**
    * Related rule IDs (for dependency errors)
    */
-  relatedRules: string[];
+  relatedRules: RuleId[];
+}
+
+/**
+ * Structured rule ID representation.
+ */
+export interface RuleId {
+  /**
+   * Base rule ID without version suffix.
+   */
+  base: string;
+  /**
+   * Normalized version number (unversioned IDs are version 1).
+   */
+  version: number;
 }
 
 /**
  * Error codes for validation errors
  */
-export type ValidationErrorCode = "circular_dependency" | "invalid_naming" | "unknown_requirement" | "duplicate_requirement" | "unknown_prefix" | "impl_in_test_file";
+export type ValidationErrorCode = "circular_dependency" | "invalid_naming" | "unknown_requirement" | "stale_requirement" | "duplicate_requirement" | "unknown_prefix" | "impl_in_test_file";
 
 /**
  * Validation results for a spec/implementation pair
@@ -205,7 +219,7 @@ export interface ApiCodeRef {
 }
 
 export interface ApiRule {
-  id: string;
+  id: RuleId;
   /**
    * Raw markdown source (without r[...] marker, but with `>` prefixes for blockquote rules)
    */
