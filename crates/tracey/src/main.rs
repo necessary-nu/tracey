@@ -256,6 +256,8 @@ async fn main() -> Result<()> {
             init_tracing(TracingConfig {
                 log_file: None,
                 enable_console: true,
+                console_ansi: true,
+                default_filter: "tracey=info",
             })?;
             bridge::http::run(root, config, port.unwrap_or(3000), open, dev).await
         }
@@ -269,6 +271,8 @@ async fn main() -> Result<()> {
             init_tracing(TracingConfig {
                 log_file: Some(log_path.clone()),
                 enable_console: false,
+                console_ansi: false,
+                default_filter: "tracey=info",
             })?;
             tracing::info!(
                 pid = std::process::id(),
@@ -283,19 +287,18 @@ async fn main() -> Result<()> {
         // r[impl daemon.cli.lsp]
         Command::Lsp { root, config } => {
             let project_root = root.unwrap_or_else(|| find_project_root().unwrap_or_default());
-            let log_path = bridge_log_path(&project_root, "lsp");
-            write_bridge_start_marker(&log_path, "lsp", &project_root, &config)?;
-            // LSP communicates over stdio, so logging must stay off stdio.
+            // LSP uses stdout for the wire protocol, so logs go to stderr.
             init_tracing(TracingConfig {
-                log_file: Some(log_path.clone()),
-                enable_console: false,
+                log_file: None,
+                enable_console: true,
+                console_ansi: false,
+                default_filter: "tracey=debug",
             })?;
             tracing::info!(
                 pid = std::process::id(),
                 command = "lsp",
                 project_root = %project_root.display(),
                 config = %config.display(),
-                log_file = %log_path.display(),
                 "starting tracey bridge"
             );
             bridge::lsp::run(Some(project_root), config).await
@@ -311,6 +314,8 @@ async fn main() -> Result<()> {
             init_tracing(TracingConfig {
                 log_file: Some(log_path),
                 enable_console: true,
+                console_ansi: true,
+                default_filter: "tracey=info",
             })?;
 
             daemon::run(project_root, config_path).await
@@ -370,6 +375,8 @@ async fn main() -> Result<()> {
             init_tracing(TracingConfig {
                 log_file: None,
                 enable_console: true,
+                console_ansi: true,
+                default_filter: "tracey=info",
             })?;
 
             let output = match query {
@@ -430,6 +437,10 @@ struct TracingConfig {
     log_file: Option<PathBuf>,
     /// If true, emit logs to console (stderr).
     enable_console: bool,
+    /// If true, include ANSI color codes in console logs.
+    console_ansi: bool,
+    /// Default filter directive if RUST_LOG is not set.
+    default_filter: &'static str,
 }
 
 /// Initialize tracing with optional file logging.
@@ -440,12 +451,14 @@ fn init_tracing(config: TracingConfig) -> Result<()> {
     // Use RUST_LOG from environment, default to info if not set
     let filter = match std::env::var("RUST_LOG") {
         Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
-        Err(_) => tracing_subscriber::EnvFilter::new("tracey=info"),
+        Err(_) => tracing_subscriber::EnvFilter::new(config.default_filter),
     };
 
-    let console_layer = config
-        .enable_console
-        .then(|| tracing_subscriber::fmt::layer().with_ansi(true));
+    let console_layer = config.enable_console.then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(config.console_ansi)
+            .with_writer(std::io::stderr)
+    });
 
     let file_layer = if let Some(log_path) = config.log_file {
         // Ensure parent directory exists

@@ -25,7 +25,7 @@ use futures_util::{SinkExt, StreamExt};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
 
@@ -43,8 +43,7 @@ struct WsMessage {
 
 /// State shared across HTTP handlers.
 struct AppState {
-    /// Client connection to daemon (protected by mutex for single-threaded access)
-    client: Mutex<DaemonClient>,
+    client: DaemonClient,
     /// Broadcast channel for notifying WebSocket clients of version changes
     version_tx: broadcast::Sender<u64>,
     /// Project root for resolving paths
@@ -93,7 +92,7 @@ pub async fn run(
     let (version_tx, _) = broadcast::channel(16);
 
     let state = Arc::new(AppState {
-        client: Mutex::new(client),
+        client,
         version_tx: version_tx.clone(),
         project_root: project_root.clone(),
         vite_port,
@@ -334,7 +333,7 @@ fn rpc<T, E: std::fmt::Debug>(res: Result<T, roam_stream::CallError<E>>) -> Resu
 
 /// GET /api/config - Get configuration.
 async fn api_config(State(state): State<Arc<AppState>>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.config().await) {
         Ok(config) => Json(config).into_response(),
         Err(e) => e,
@@ -346,7 +345,7 @@ async fn api_forward(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ImplQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     // Get config to resolve spec/impl if not provided
     let config = match rpc(client.config().await) {
@@ -368,7 +367,7 @@ async fn api_reverse(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ImplQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -386,7 +385,7 @@ async fn api_reverse(
 
 /// GET /api/version - Get current data version.
 async fn api_version(State(state): State<Arc<AppState>>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.version().await) {
         Ok(version) => Json(VersionResponse { version }).into_response(),
         Err(e) => e,
@@ -395,7 +394,7 @@ async fn api_version(State(state): State<Arc<AppState>>) -> Response {
 
 /// GET /api/health - Get daemon health status.
 async fn api_health(State(state): State<Arc<AppState>>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.health().await) {
         Ok(health) => Json(health).into_response(),
         Err(e) => e,
@@ -404,7 +403,7 @@ async fn api_health(State(state): State<Arc<AppState>>) -> Response {
 
 /// GET /api/spec - Get rendered spec content.
 async fn api_spec(State(state): State<Arc<AppState>>, Query(query): Query<SpecQuery>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -422,7 +421,7 @@ async fn api_spec(State(state): State<Arc<AppState>>, Query(query): Query<SpecQu
 
 /// GET /api/file - Get file content with syntax highlighting.
 async fn api_file(State(state): State<Arc<AppState>>, Query(query): Query<FileQuery>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -452,7 +451,7 @@ async fn api_search(
     let q = query.q.unwrap_or_default();
     let limit = query.limit.unwrap_or(50);
 
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.search(q.clone(), limit as u32).await) {
         Ok(results) => Json(SearchResponse {
             query: q,
@@ -466,7 +465,7 @@ async fn api_search(
 
 /// GET /api/status - Get coverage status.
 async fn api_status(State(state): State<Arc<AppState>>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.status().await) {
         Ok(status) => Json(status).into_response(),
         Err(e) => e,
@@ -478,7 +477,7 @@ async fn api_validate(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ImplQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -503,7 +502,7 @@ async fn api_uncovered(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CoverageQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -529,7 +528,7 @@ async fn api_untested(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CoverageQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -555,7 +554,7 @@ async fn api_unmapped(
     State(state): State<Arc<AppState>>,
     Query(query): Query<UnmappedQuery>,
 ) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
 
     let config = match rpc(client.config().await) {
         Ok(c) => c,
@@ -578,7 +577,7 @@ async fn api_unmapped(
 
 /// GET /api/rule - Get details for a specific rule.
 async fn api_rule(State(state): State<Arc<AppState>>, Query(query): Query<RuleQuery>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     let Some(rule_id) = parse_rule_id(&query.id) else {
         return ApiError::bad_request("Invalid rule ID");
     };
@@ -592,7 +591,7 @@ async fn api_rule(State(state): State<Arc<AppState>>, Query(query): Query<RuleQu
 
 /// GET /api/reload - Force a rebuild.
 async fn api_reload(State(state): State<Arc<AppState>>) -> Response {
-    let client = state.client.lock().await;
+    let client = state.client.clone();
     match rpc(client.reload().await) {
         Ok(response) => Json(response).into_response(),
         Err(e) => e,
@@ -617,7 +616,7 @@ async fn handle_ws_client(socket: ws::WebSocket, state: Arc<AppState>) {
 
     // Send initial version
     {
-        let client = state.client.lock().await;
+        let client = state.client.clone();
         if let Ok(version) = client.version().await {
             let msg = WsMessage {
                 msg_type: "version".to_string(),
@@ -667,7 +666,7 @@ async fn version_poller(state: Arc<AppState>) {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let version = {
-            let client = state.client.lock().await;
+            let client = state.client.clone();
             client.version().await.ok()
         };
 

@@ -6,8 +6,9 @@
 //!
 //! r[impl daemon.bridge.lsp]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use eyre::Result;
 use tower_lsp::jsonrpc::Result as LspResult;
@@ -57,16 +58,15 @@ async fn run_lsp_server(project_root: PathBuf) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    // Create daemon client (connects lazily, auto-reconnects)
     let daemon_client = new_client(project_root.clone());
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
-        state: tokio::sync::Mutex::new(LspState {
+        daemon_client,
+        project_root: project_root.clone(),
+        doc_state: Mutex::new(LspDocState {
             documents: HashMap::new(),
-            daemon_client,
-            files_with_diagnostics: std::collections::HashSet::new(),
-            project_root: project_root.clone(),
+            files_with_diagnostics: HashSet::new(),
         }),
     });
     Server::new(stdin, stdout, socket).serve(service).await;
@@ -76,47 +76,26 @@ async fn run_lsp_server(project_root: PathBuf) -> Result<()> {
 
 struct Backend {
     client: Client,
-    state: tokio::sync::Mutex<LspState>,
+    daemon_client: DaemonClient,
+    project_root: PathBuf,
+    doc_state: Mutex<LspDocState>,
 }
 
-struct LspState {
+/// Document-tracking state requiring mutual exclusion.
+/// Only holds in-memory document content and diagnostic bookkeeping.
+/// Never locked across an await point.
+struct LspDocState {
     /// Document content cache: uri -> content
     documents: HashMap<String, String>,
-    /// Client connection to daemon (connects lazily, auto-reconnects)
-    daemon_client: DaemonClient,
     /// Files that have been published with non-empty diagnostics.
     /// Used to clear diagnostics when issues are fixed.
-    files_with_diagnostics: std::collections::HashSet<String>,
-    /// Project root path
-    project_root: PathBuf,
-}
-
-impl LspState {
-    /// Store document content when opened.
-    fn document_opened(&mut self, uri: &Url, content: String) {
-        self.documents.insert(uri.to_string(), content);
-    }
-
-    /// Update document content when changed.
-    fn document_changed(&mut self, uri: &Url, content: String) {
-        self.documents.insert(uri.to_string(), content);
-    }
-
-    /// Remove document when closed.
-    fn document_closed(&mut self, uri: &Url) {
-        self.documents.remove(uri.as_str());
-    }
+    files_with_diagnostics: HashSet<String>,
 }
 
 impl Backend {
-    /// Lock state and get access to all LSP state.
-    async fn state(&self) -> tokio::sync::MutexGuard<'_, LspState> {
-        self.state.lock().await
-    }
-
     /// Get path and content for a document, for daemon calls.
-    async fn get_path_and_content(&self, uri: &Url) -> Option<(String, String)> {
-        let state = self.state().await;
+    fn get_path_and_content(&self, uri: &Url) -> Option<(String, String)> {
+        let state = self.doc_state.lock().unwrap();
         let content = state.documents.get(uri.as_str())?.clone();
         let path = uri.to_file_path().ok()?.to_string_lossy().into_owned();
         Some((path, content))
@@ -130,16 +109,15 @@ impl Backend {
     /// r[impl lsp.diagnostics.unknown-prefix-message]
     /// r[impl lsp.diagnostics.unknown-verb]
     async fn publish_diagnostics(&self, uri: Url) {
-        let Some((path, content)) = self.get_path_and_content(&uri).await else {
+        let Some((path, content)) = self.get_path_and_content(&uri) else {
             return;
         };
 
-        let mut state = self.state().await;
         let req = LspDocumentRequest {
             path: path.clone(),
             content,
         };
-        let Ok(daemon_diagnostics) = rpc(state.daemon_client.lsp_diagnostics(req).await) else {
+        let Ok(daemon_diagnostics) = rpc(self.daemon_client.lsp_diagnostics(req).await) else {
             return;
         };
 
@@ -171,13 +149,15 @@ impl Backend {
             .collect();
 
         // Track files with non-empty diagnostics for clearing later
-        if diagnostics.is_empty() {
-            state.files_with_diagnostics.remove(&path);
-        } else {
-            state.files_with_diagnostics.insert(path);
+        {
+            let mut state = self.doc_state.lock().unwrap();
+            if diagnostics.is_empty() {
+                state.files_with_diagnostics.remove(&path);
+            } else {
+                state.files_with_diagnostics.insert(path);
+            }
         }
 
-        drop(state); // Release lock before async call
         self.client
             .publish_diagnostics(uri, diagnostics, None)
             .await;
@@ -186,8 +166,7 @@ impl Backend {
     /// Notify daemon that a file was opened.
     async fn notify_vfs_open(&self, uri: &Url, content: &str) {
         if let Ok(path) = uri.to_file_path() {
-            let state = self.state().await;
-            let _ = state
+            let _ = self
                 .daemon_client
                 .vfs_open(path.to_string_lossy().into_owned(), content.to_string())
                 .await;
@@ -197,8 +176,7 @@ impl Backend {
     /// Notify daemon that a file changed.
     async fn notify_vfs_change(&self, uri: &Url, content: &str) {
         if let Ok(path) = uri.to_file_path() {
-            let state = self.state().await;
-            let _ = state
+            let _ = self
                 .daemon_client
                 .vfs_change(path.to_string_lossy().into_owned(), content.to_string())
                 .await;
@@ -208,8 +186,7 @@ impl Backend {
     /// Notify daemon that a file was closed.
     async fn notify_vfs_close(&self, uri: &Url) {
         if let Ok(path) = uri.to_file_path() {
-            let state = self.state().await;
-            let _ = state
+            let _ = self
                 .daemon_client
                 .vfs_close(path.to_string_lossy().into_owned())
                 .await;
@@ -218,46 +195,39 @@ impl Backend {
 
     /// Publish diagnostics for all files in the workspace.
     async fn publish_workspace_diagnostics(&self) {
-        let project_root = self.state().await.project_root.clone();
+        let config_error = rpc(self.daemon_client.health().await)
+            .ok()
+            .and_then(|h| h.config_error);
 
-        // First, gather all data we need from daemon while holding lock
-        let (config_error, all_diagnostics, files_to_clear) = {
-            let mut state = self.state().await;
+        let all_diagnostics = match rpc(self.daemon_client.lsp_workspace_diagnostics().await) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
 
-            // Check for config errors
-            let config_error = rpc(state.daemon_client.health().await)
-                .ok()
-                .and_then(|h| h.config_error);
+        let current_paths_with_diagnostics: HashSet<String> = all_diagnostics
+            .iter()
+            .map(|fd| {
+                self.project_root
+                    .join(&fd.path)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
 
-            // Get workspace diagnostics
-            let all_diagnostics = match rpc(state.daemon_client.lsp_workspace_diagnostics().await) {
-                Ok(d) => d,
-                Err(_) => return,
-            };
-
-            // Collect paths that currently have diagnostics
-            let current_paths_with_diagnostics: std::collections::HashSet<String> = all_diagnostics
-                .iter()
-                .map(|fd| project_root.join(&fd.path).to_string_lossy().into_owned())
-                .collect();
-
-            // Find files that previously had diagnostics but no longer do
-            let files_to_clear: Vec<String> = state
+        let files_to_clear: Vec<String> = {
+            let mut state = self.doc_state.lock().unwrap();
+            let to_clear: Vec<String> = state
                 .files_with_diagnostics
                 .iter()
                 .filter(|path| !current_paths_with_diagnostics.contains(*path))
                 .cloned()
                 .collect();
-
-            // Update tracked files
             state.files_with_diagnostics = current_paths_with_diagnostics;
-
-            (config_error, all_diagnostics, files_to_clear)
+            to_clear
         };
-        // Lock is now released
 
         // Publish config error diagnostic on config file
-        let config_path = project_root.join(".config/tracey/config.styx");
+        let config_path = self.project_root.join(".config/tracey/config.styx");
         if let Ok(uri) = Url::from_file_path(&config_path) {
             if let Some(error_msg) = config_error {
                 let diagnostic = Diagnostic {
@@ -296,8 +266,7 @@ impl Backend {
 
         // Publish diagnostics for files that currently have issues
         for file_diag in all_diagnostics {
-            // Convert relative path to absolute and then to URI
-            let abs_path = project_root.join(&file_diag.path);
+            let abs_path = self.project_root.join(&file_diag.path);
             let Ok(uri) = Url::from_file_path(&abs_path) else {
                 continue;
             };
@@ -400,7 +369,10 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let content = params.text_document.text.clone();
-        self.state().await.document_opened(&uri, content.clone());
+        {
+            let mut state = self.doc_state.lock().unwrap();
+            state.documents.insert(uri.to_string(), content.clone());
+        }
         self.notify_vfs_open(&uri, &content).await;
         self.publish_diagnostics(uri).await;
     }
@@ -410,7 +382,10 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri.clone();
         if let Some(change) = params.content_changes.into_iter().next() {
             let content = change.text.clone();
-            self.state().await.document_changed(&uri, content.clone());
+            {
+                let mut state = self.doc_state.lock().unwrap();
+                state.documents.insert(uri.to_string(), content.clone());
+            }
             self.notify_vfs_change(&uri, &content).await;
             self.publish_diagnostics(uri).await;
         }
@@ -428,7 +403,10 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.clone();
-        self.state().await.document_closed(&uri);
+        {
+            let mut state = self.doc_state.lock().unwrap();
+            state.documents.remove(uri.as_str());
+        }
         self.notify_vfs_close(&uri).await;
         // Don't clear diagnostics on close - workspace diagnostics should persist
         // for all files, not just open ones. The next publish_workspace_diagnostics
@@ -443,11 +421,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspPositionRequest {
             path,
             content,
@@ -455,7 +432,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(completions) = rpc(state.daemon_client.lsp_completions(req).await) else {
+        let Ok(completions) = rpc(self.daemon_client.lsp_completions(req).await) else {
             return Ok(None);
         };
 
@@ -488,11 +465,18 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        tracing::debug!(
+            uri = %uri,
+            line = position.line,
+            character = position.character,
+            "hover request"
+        );
+
+        let Some((path, content)) = self.get_path_and_content(uri) else {
+            tracing::debug!(uri = %uri, "hover: no path/content for uri");
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspPositionRequest {
             path,
             content,
@@ -500,11 +484,17 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(Some(info)) = rpc(state.daemon_client.lsp_hover(req).await) else {
-            return Ok(None);
+        let info = match rpc(self.daemon_client.lsp_hover(req).await) {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                tracing::debug!(uri = %uri, line = position.line, character = position.character, "hover: no rule at position");
+                return Ok(None);
+            }
+            Err(e) => {
+                tracing::warn!(uri = %uri, error = %e, "hover: daemon RPC error");
+                return Ok(None);
+            }
         };
-
-        let project_root = self.state().await.project_root.clone();
 
         // Format hover with spec info
         let mut markdown = format!("## {}\n\n{}", info.rule_id, info.raw);
@@ -517,9 +507,8 @@ impl LanguageServer for Backend {
         if !info.impl_refs.is_empty() {
             markdown.push_str("\n\n**Implementations:**");
             for r in &info.impl_refs {
-                let abs_path = project_root.join(&r.file);
+                let abs_path = self.project_root.join(&r.file);
                 if let Ok(uri) = Url::from_file_path(&abs_path) {
-                    // Use file URI with line number fragment
                     markdown.push_str(&format!("\n- [{}:{}]({}#L{})", r.file, r.line, uri, r.line));
                 } else {
                     markdown.push_str(&format!("\n- {}:{}", r.file, r.line));
@@ -531,7 +520,7 @@ impl LanguageServer for Backend {
         if !info.verify_refs.is_empty() {
             markdown.push_str("\n\n**Verifications:**");
             for r in &info.verify_refs {
-                let abs_path = project_root.join(&r.file);
+                let abs_path = self.project_root.join(&r.file);
                 if let Ok(uri) = Url::from_file_path(&abs_path) {
                     markdown.push_str(&format!("\n- [{}:{}]({}#L{})", r.file, r.line, uri, r.line));
                 } else {
@@ -572,12 +561,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
-        let project_root = state.project_root.clone();
         let req = LspPositionRequest {
             path,
             content,
@@ -585,7 +572,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(locations) = rpc(state.daemon_client.lsp_definition(req).await) else {
+        let Ok(locations) = rpc(self.daemon_client.lsp_definition(req).await) else {
             return Ok(None);
         };
 
@@ -594,7 +581,7 @@ impl LanguageServer for Backend {
         }
 
         let loc = &locations[0];
-        let def_uri = Url::from_file_path(project_root.join(&loc.path))
+        let def_uri = Url::from_file_path(self.project_root.join(&loc.path))
             .map_err(|_| tower_lsp::jsonrpc::Error::invalid_params("Invalid file path"))?;
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -620,12 +607,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
-        let project_root = state.project_root.clone();
         let req = LspPositionRequest {
             path,
             content,
@@ -633,7 +618,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(locations) = rpc(state.daemon_client.lsp_implementation(req).await) else {
+        let Ok(locations) = rpc(self.daemon_client.lsp_implementation(req).await) else {
             return Ok(None);
         };
 
@@ -644,7 +629,7 @@ impl LanguageServer for Backend {
         let lsp_locations: Vec<Location> = locations
             .into_iter()
             .filter_map(|loc| {
-                let uri = Url::from_file_path(project_root.join(&loc.path)).ok()?;
+                let uri = Url::from_file_path(self.project_root.join(&loc.path)).ok()?;
                 Some(Location {
                     uri,
                     range: Range {
@@ -668,12 +653,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
-        let project_root = state.project_root.clone();
         let req = LspReferencesRequest {
             path,
             content,
@@ -682,7 +665,7 @@ impl LanguageServer for Backend {
             include_declaration: params.context.include_declaration,
         };
 
-        let Ok(locations) = rpc(state.daemon_client.lsp_references(req).await) else {
+        let Ok(locations) = rpc(self.daemon_client.lsp_references(req).await) else {
             return Ok(None);
         };
 
@@ -693,7 +676,7 @@ impl LanguageServer for Backend {
         let lsp_locations: Vec<Location> = locations
             .into_iter()
             .filter_map(|loc| {
-                let uri = Url::from_file_path(project_root.join(&loc.path)).ok()?;
+                let uri = Url::from_file_path(self.project_root.join(&loc.path)).ok()?;
                 Some(Location {
                     uri,
                     range: Range {
@@ -720,11 +703,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspPositionRequest {
             path,
             content,
@@ -732,7 +714,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(locations) = rpc(state.daemon_client.lsp_document_highlight(req).await) else {
+        let Ok(locations) = rpc(self.daemon_client.lsp_document_highlight(req).await) else {
             return Ok(None);
         };
 
@@ -766,14 +748,13 @@ impl LanguageServer for Backend {
     ) -> LspResult<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspDocumentRequest { path, content };
 
-        let Ok(symbols) = rpc(state.daemon_client.lsp_document_symbols(req).await) else {
+        let Ok(symbols) = rpc(self.daemon_client.lsp_document_symbols(req).await) else {
             return Ok(None);
         };
 
@@ -815,14 +796,7 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> LspResult<Option<Vec<SymbolInformation>>> {
-        let state = self.state().await;
-        let project_root = state.project_root.clone();
-
-        let Ok(symbols) = rpc(state
-            .daemon_client
-            .lsp_workspace_symbols(params.query)
-            .await)
-        else {
+        let Ok(symbols) = rpc(self.daemon_client.lsp_workspace_symbols(params.query).await) else {
             return Ok(None);
         };
 
@@ -834,7 +808,7 @@ impl LanguageServer for Backend {
             .into_iter()
             .filter_map(|s| {
                 // Try to construct a URI for the symbol
-                let uri = Url::from_file_path(project_root.join("docs/spec")).ok()?;
+                let uri = Url::from_file_path(self.project_root.join("docs/spec")).ok()?;
                 #[allow(deprecated)]
                 Some(SymbolInformation {
                     name: s.name,
@@ -866,11 +840,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         let position = params.range.start;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspPositionRequest {
             path,
             content,
@@ -878,7 +851,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(actions) = rpc(state.daemon_client.lsp_code_actions(req).await) else {
+        let Ok(actions) = rpc(self.daemon_client.lsp_code_actions(req).await) else {
             return Ok(None);
         };
 
@@ -914,14 +887,13 @@ impl LanguageServer for Backend {
     async fn code_lens(&self, params: CodeLensParams) -> LspResult<Option<Vec<CodeLens>>> {
         let uri = &params.text_document.uri;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspDocumentRequest { path, content };
 
-        let Ok(lenses) = rpc(state.daemon_client.lsp_code_lens(req).await) else {
+        let Ok(lenses) = rpc(self.daemon_client.lsp_code_lens(req).await) else {
             return Ok(None);
         };
 
@@ -962,11 +934,10 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> LspResult<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = InlayHintsRequest {
             path,
             content,
@@ -974,7 +945,7 @@ impl LanguageServer for Backend {
             end_line: params.range.end.line,
         };
 
-        let Ok(hints) = rpc(state.daemon_client.lsp_inlay_hints(req).await) else {
+        let Ok(hints) = rpc(self.daemon_client.lsp_inlay_hints(req).await) else {
             return Ok(None);
         };
 
@@ -1009,11 +980,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         let position = params.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspPositionRequest {
             path,
             content,
@@ -1021,7 +991,7 @@ impl LanguageServer for Backend {
             character: position.character,
         };
 
-        let Ok(Some(result)) = rpc(state.daemon_client.lsp_prepare_rename(req).await) else {
+        let Ok(Some(result)) = rpc(self.daemon_client.lsp_prepare_rename(req).await) else {
             return Ok(None);
         };
 
@@ -1044,12 +1014,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
-        let project_root = state.project_root.clone();
         let req = LspRenameRequest {
             path,
             content,
@@ -1058,7 +1026,7 @@ impl LanguageServer for Backend {
             new_name: params.new_name,
         };
 
-        let Ok(edits) = rpc(state.daemon_client.lsp_rename(req).await) else {
+        let Ok(edits) = rpc(self.daemon_client.lsp_rename(req).await) else {
             return Ok(None);
         };
 
@@ -1069,7 +1037,7 @@ impl LanguageServer for Backend {
         // Group edits by file
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         for edit in edits {
-            let uri = match Url::from_file_path(project_root.join(&edit.path)) {
+            let uri = match Url::from_file_path(self.project_root.join(&edit.path)) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
@@ -1101,14 +1069,13 @@ impl LanguageServer for Backend {
     ) -> LspResult<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
 
-        let Some((path, content)) = self.get_path_and_content(uri).await else {
+        let Some((path, content)) = self.get_path_and_content(uri) else {
             return Ok(None);
         };
 
-        let state = self.state().await;
         let req = LspDocumentRequest { path, content };
 
-        let Ok(tokens) = rpc(state.daemon_client.lsp_semantic_tokens(req).await) else {
+        let Ok(tokens) = rpc(self.daemon_client.lsp_semantic_tokens(req).await) else {
             return Ok(None);
         };
 
