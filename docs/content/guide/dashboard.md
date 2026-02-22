@@ -1,4 +1,7 @@
-# Dashboard
++++
+title = "Dashboard"
+weight = 5
++++
 
 Tracey includes a web dashboard for browsing specs, exploring coverage, and navigating source code.
 
