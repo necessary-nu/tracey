@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use marq::{RenderOptions, render};
 
 use crate::config::Config;
-use crate::matches_glob;
 
 /// A rule whose text changed in the staged index but whose version was not bumped.
 #[derive(Debug)]
@@ -129,7 +128,11 @@ pub async fn detect_changed_rules(
         }
 
         // Only consider files that match a spec include pattern.
-        if !spec_patterns.iter().any(|p| matches_glob(staged_file, p)) {
+        if !spec_patterns.iter().any(|p| {
+            globset::Glob::new(p)
+                .map(|g| g.compile_matcher().is_match(staged_file))
+                .unwrap_or(false)
+        }) {
             continue;
         }
 

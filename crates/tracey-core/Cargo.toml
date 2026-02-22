@@ -17,7 +17,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [features]
 default = ["walk", "parallel"]
-walk = ["dep:ignore"]
+walk = ["dep:ignore", "dep:globset"]
 parallel = ["dep:rayon"]
 reverse = [
     "dep:arborium",
@@ -60,6 +60,7 @@ pulldown-cmark = "0.13"
 
 # Optional
 ignore = { workspace = true, optional = true }
+globset = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 arborium = { workspace = true, optional = true }
 arborium-rust = { workspace = true, optional = true }

@@ -117,6 +117,10 @@ pub async fn load_rules_from_glob(
         .git_ignore(true)
         .build();
 
+    let glob_matcher = globset::Glob::new(&effective_pattern)
+        .map(|g| g.compile_matcher())
+        .map_err(|e| eyre::eyre!("Invalid glob pattern '{}': {}", effective_pattern, e))?;
+
     for entry in walker {
         let entry = entry?;
         let path = entry.path();
@@ -140,7 +144,7 @@ pub async fn load_rules_from_glob(
             relative_str.clone()
         };
 
-        if !matches_glob(&relative_str, &effective_pattern) {
+        if !glob_matcher.is_match(relative) {
             continue;
         }
 
@@ -261,50 +265,6 @@ pub async fn load_rules_from_globs(
     }
 
     Ok(all_rules)
-}
-
-/// Simple glob pattern matching
-pub(crate) fn matches_glob(path: &str, pattern: &str) -> bool {
-    // Make path separators consistent in case of windows
-    let path = path.replace('\\', "/");
-    let pattern = pattern.replace('\\', "/");
-
-    // Handle **/*.md pattern
-    if pattern == "**/*.md" {
-        return path.ends_with(".md");
-    }
-
-    // Handle prefix/**/*.md patterns like "docs/**/*.md"
-    if let Some(rest) = pattern.strip_suffix("/**/*.md") {
-        return path.starts_with(rest) && path.ends_with(".md");
-    }
-
-    // Handle prefix/** patterns
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix);
-    }
-
-    // Handle exact matches
-    if !pattern.contains('*') {
-        return path == pattern;
-    }
-
-    // Fallback: simple contains check for the non-wildcard parts
-    let parts: Vec<&str> = pattern.split('*').filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        return true;
-    }
-
-    let mut remaining = path.as_str();
-    for part in parts {
-        if let Some(idx) = remaining.find(part) {
-            remaining = &remaining[idx + part.len()..];
-        } else {
-            return false;
-        }
-    }
-
-    true
 }
 
 pub fn find_project_root() -> Result<PathBuf> {

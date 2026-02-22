@@ -680,7 +680,23 @@ async fn get_cached_source_file(
 #[derive(Clone)]
 struct ScanRootPattern {
     root: PathBuf,
-    pattern: String,
+    matcher: globset::GlobMatcher,
+}
+
+/// Split a glob pattern into (directory_prefix, glob_suffix).
+///
+/// The directory prefix is the longest path before any wildcard characters,
+/// so that the walker can start from a narrowed root instead of scanning
+/// the entire project tree.
+fn split_glob_prefix(pattern: &str) -> (&str, &str) {
+    if let Some(wildcard_pos) = pattern.find("**").or_else(|| pattern.find('*')) {
+        let base = pattern[..wildcard_pos].trim_end_matches('/');
+        let suffix = &pattern[wildcard_pos..];
+        (base, suffix)
+    } else {
+        // No wildcards — exact path
+        (pattern, "")
+    }
 }
 
 fn build_scan_roots(
@@ -693,42 +709,53 @@ fn build_scan_roots(
     if include.is_empty() {
         roots.push(ScanRootPattern {
             root: project_root.to_path_buf(),
-            pattern: "**/*".to_string(),
+            matcher: globset::Glob::new("**/*")
+                .expect("valid glob")
+                .compile_matcher(),
         });
         return (roots, warnings);
     }
 
     for pattern in include {
-        if pattern.starts_with("../") {
-            let base_path =
-                if let Some(wildcard_pos) = pattern.find("**").or_else(|| pattern.find('*')) {
-                    pattern[..wildcard_pos].trim_end_matches('/')
-                } else {
-                    pattern.as_str()
-                };
-            let resolved_path = project_root.join(base_path);
-            if !resolved_path.exists() {
+        let (base_path, glob_suffix) = split_glob_prefix(pattern);
+
+        let resolved_root = if base_path.is_empty() {
+            project_root.to_path_buf()
+        } else {
+            project_root.join(base_path)
+        };
+
+        if !base_path.is_empty() && !resolved_root.exists() {
+            warnings.push(format!(
+                "Warning: Path not found: {}\n  Pattern: {}",
+                resolved_root.display(),
+                pattern
+            ));
+            continue;
+        }
+
+        // For exact paths (no glob suffix), match everything under the resolved root
+        let effective_glob = if glob_suffix.is_empty() {
+            "**/*"
+        } else {
+            glob_suffix
+        };
+
+        let matcher = match globset::Glob::new(effective_glob) {
+            Ok(glob) => glob.compile_matcher(),
+            Err(e) => {
                 warnings.push(format!(
-                    "Warning: Cross-workspace path not found: {}\n  Pattern: {}",
-                    base_path, pattern
+                    "Warning: Invalid glob pattern '{}': {}",
+                    pattern, e
                 ));
                 continue;
             }
-            let adjusted_pattern = if let Some(suffix) = pattern.strip_prefix(base_path) {
-                suffix.trim_start_matches('/').to_string()
-            } else {
-                pattern.to_string()
-            };
-            roots.push(ScanRootPattern {
-                root: resolved_path,
-                pattern: adjusted_pattern,
-            });
-        } else {
-            roots.push(ScanRootPattern {
-                root: project_root.to_path_buf(),
-                pattern: pattern.clone(),
-            });
-        }
+        };
+
+        roots.push(ScanRootPattern {
+            root: resolved_root,
+            matcher,
+        });
     }
 
     (roots, warnings)
@@ -738,8 +765,7 @@ fn path_matches_root_pattern(path: &Path, root_pattern: &ScanRootPattern) -> boo
     let Ok(relative) = path.strip_prefix(&root_pattern.root) else {
         return false;
     };
-    let relative_str = relative.to_string_lossy();
-    glob_match(&relative_str, &root_pattern.pattern)
+    root_pattern.matcher.is_match(relative)
 }
 
 fn path_matches_any_root(path: &Path, roots: &[ScanRootPattern]) -> bool {
@@ -751,10 +777,11 @@ fn path_matches_excludes(path: &Path, roots: &[ScanRootPattern], exclude: &[Stri
         let Ok(relative) = path.strip_prefix(&r.root) else {
             return false;
         };
-        let relative_str = relative.to_string_lossy();
-        exclude
-            .iter()
-            .any(|pattern| glob_match(&relative_str, pattern))
+        exclude.iter().any(|pattern| {
+            globset::Glob::new(pattern)
+                .map(|g| g.compile_matcher().is_match(relative))
+                .unwrap_or(false)
+        })
     })
 }
 
@@ -2011,11 +2038,12 @@ pub async fn build_dashboard_data_with_overlay_and_cache(
                     if ft.is_file() {
                         let path = entry.path();
                         if let Ok(relative) = path.strip_prefix(project_root) {
-                            let relative_str = relative.to_string_lossy();
                             for pattern in &test_patterns {
-                                if glob_match(&relative_str, pattern) {
-                                    test_files.insert(path.to_path_buf());
-                                    break;
+                                if let Ok(glob) = globset::Glob::new(pattern) {
+                                    if glob.compile_matcher().is_match(relative) {
+                                        test_files.insert(path.to_path_buf());
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -2406,10 +2434,13 @@ async fn load_spec_content(
         }
 
         let relative = path.strip_prefix(root).unwrap_or(path);
-        let relative_str = relative.to_string_lossy().to_string();
 
         // Check if path matches any of the patterns
-        let matches_any = patterns.iter().any(|p| glob_match(&relative_str, p));
+        let matches_any = patterns.iter().any(|p| {
+            globset::Glob::new(p)
+                .map(|g| g.compile_matcher().is_match(relative))
+                .unwrap_or(false)
+        });
         if !matches_any {
             continue;
         }
@@ -2420,7 +2451,7 @@ async fn load_spec_content(
                 Ok((fm, _)) => fm.weight,
                 Err(_) => 0, // Default weight if no frontmatter
             };
-            files.push((relative_str, content, weight));
+            files.push((relative.to_string_lossy().to_string(), content, weight));
         }
     }
 
@@ -2602,35 +2633,4 @@ fn build_outline(
     }
 
     entries
-}
-
-/// Simple glob pattern matching
-///
-/// Normalizes path separators to forward slashes for cross-platform compatibility.
-pub fn glob_match(path: &str, pattern: &str) -> bool {
-    // Normalize Windows backslashes to forward slashes
-    let path = path.replace('\\', "/");
-
-    if pattern == "**/*.rs" || pattern == "**/*.md" {
-        let ext = pattern.rsplit('.').next().unwrap_or("");
-        return path.ends_with(&format!(".{}", ext));
-    }
-
-    if let Some(rest) = pattern.strip_suffix("/**/*.rs") {
-        return path.starts_with(rest) && path.ends_with(".rs");
-    }
-    if let Some(rest) = pattern.strip_suffix("/**/*.md") {
-        return path.starts_with(rest) && path.ends_with(".md");
-    }
-
-    if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix);
-    }
-
-    if !pattern.contains('*') {
-        return path == pattern;
-    }
-
-    // Fallback
-    true
 }

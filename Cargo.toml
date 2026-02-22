@@ -33,6 +33,7 @@ eyre = "0.6"
 
 # File walking (gitignore-aware)
 ignore = "0.4"
+globset = "0.4"
 
 # Parallel processing
 rayon = "1"
